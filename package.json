@@ -1,0 +1,56 @@
+{
+  "name": "brain-dump",
+  "author": "Adrien THIERY",
+  "version": "1.0.1",
+  "keywords": [
+    "pebble-app"
+  ],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "Brain Dump (index01 for your pebble)",
+    "uuid": "4adb1901-432a-4713-aaf1-b048aa9a6d61",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ],
+    "watchapp": {
+      "watchface": false
+    },
+    "capabilities": [
+      "configurable"
+    ],
+    "messageKeys": [
+      "NOTE_TEXT",
+      "NOTE_TYPE",
+      "NOTE_IS_FOLLOWUP",
+      "AI_RESPONSE",
+      "AI_RESPONSE_DONE",
+      "CONFIRM",
+      "DEST_USED",
+      "DEST_MASK",
+      "REQUEST_HISTORY",
+      "HISTORY_COUNT",
+      "HISTORY_IDX",
+      "HISTORY_TEXT",
+      "HISTORY_DEST",
+      "HISTORY_TIME",
+      "CLEAR_CONTEXT",
+      "CLOCK_24H"
+    ],
+    "resources": {
+      "media": [
+        {
+          "type": "png",
+          "name": "MENU_ICON",
+          "file": "images/menu_icon.png",
+          "menuIcon": true
+        }
+      ]
+    }
+  }
+}
