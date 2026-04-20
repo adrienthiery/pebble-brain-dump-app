@@ -191,6 +191,13 @@ static void set_status(const char *msg) {
 // PERSISTENT HISTORY
 // ============================================================================
 
+// Scratch buffers for persist read/write — kept in BSS (not stack) to avoid
+// stack overflow. HistoryEntry is 653 bytes; allocating two on the stack
+// simultaneously (history_save_item → history_load_from_persist) would consume
+// ~1.3 KB of the ~2.5 KB app stack and trigger a hard fault.
+static HistoryEntry  s_hist_entry_buf;
+static ReminderEntry s_rem_entry_buf;
+
 static void history_load_from_persist(void) {
     // Wipe history if schema version has changed
     if (!persist_exists(PERSIST_HISTORY_VERSION_KEY) ||
@@ -211,12 +218,11 @@ static void history_load_from_persist(void) {
         int slot = ((stored - 1 - i) % MAX_HISTORY + MAX_HISTORY) % MAX_HISTORY;
         uint32_t key = (uint32_t)(PERSIST_HISTORY_BASE + slot);
         if (!persist_exists(key)) continue;
-        HistoryEntry e;
-        if (persist_read_data(key, &e, sizeof(e)) < 0) continue;
-        strncpy(s_history_short[s_history_count], e.short_text, HISTORY_SHORT_LEN - 1);
-        strncpy(s_history_full [s_history_count], e.full_text,  HISTORY_FULL_LEN  - 1);
-        s_history_dest[s_history_count] = e.dest;
-        s_history_ts  [s_history_count] = e.timestamp;
+        if (persist_read_data(key, &s_hist_entry_buf, sizeof(s_hist_entry_buf)) < 0) continue;
+        strncpy(s_history_short[s_history_count], s_hist_entry_buf.short_text, HISTORY_SHORT_LEN - 1);
+        strncpy(s_history_full [s_history_count], s_hist_entry_buf.full_text,  HISTORY_FULL_LEN  - 1);
+        s_history_dest[s_history_count] = s_hist_entry_buf.dest;
+        s_history_ts  [s_history_count] = s_hist_entry_buf.timestamp;
         s_history_count++;
     }
 }
@@ -228,14 +234,13 @@ static void history_save_item(const char *question, const char *response, int de
                  ? persist_read_int(PERSIST_HISTORY_COUNT) : 0;
     int slot = stored % MAX_HISTORY;
 
-    HistoryEntry e;
-    memset(&e, 0, sizeof(e));
-    strncpy(e.short_text, question,           HISTORY_SHORT_LEN - 1);
-    strncpy(e.full_text,  response ? response : question, HISTORY_FULL_LEN - 1);
-    e.dest      = (uint8_t)dest;
-    e.timestamp = (uint32_t)time(NULL);
+    memset(&s_hist_entry_buf, 0, sizeof(s_hist_entry_buf));
+    strncpy(s_hist_entry_buf.short_text, question,           HISTORY_SHORT_LEN - 1);
+    strncpy(s_hist_entry_buf.full_text,  response ? response : question, HISTORY_FULL_LEN - 1);
+    s_hist_entry_buf.dest      = (uint8_t)dest;
+    s_hist_entry_buf.timestamp = (uint32_t)time(NULL);
 
-    persist_write_data((uint32_t)(PERSIST_HISTORY_BASE + slot), &e, sizeof(e));
+    persist_write_data((uint32_t)(PERSIST_HISTORY_BASE + slot), &s_hist_entry_buf, sizeof(s_hist_entry_buf));
     persist_write_int(PERSIST_HISTORY_COUNT, stored + 1);
 
     history_load_from_persist();
@@ -248,10 +253,9 @@ static void history_update_latest(const char *response) {
     if (stored == 0) return;
     int slot = ((stored - 1) % MAX_HISTORY + MAX_HISTORY) % MAX_HISTORY;
     uint32_t key = (uint32_t)(PERSIST_HISTORY_BASE + slot);
-    HistoryEntry e;
-    if (persist_read_data(key, &e, sizeof(e)) < 0) return;
-    strncpy(e.full_text, response, HISTORY_FULL_LEN - 1);
-    persist_write_data(key, &e, sizeof(e));
+    if (persist_read_data(key, &s_hist_entry_buf, sizeof(s_hist_entry_buf)) < 0) return;
+    strncpy(s_hist_entry_buf.full_text, response, HISTORY_FULL_LEN - 1);
+    persist_write_data(key, &s_hist_entry_buf, sizeof(s_hist_entry_buf));
     // Also update in-memory display (most-recent is at index 0)
     if (s_history_count > 0) {
         strncpy(s_history_full[0], response, HISTORY_FULL_LEN - 1);
@@ -265,11 +269,10 @@ static void history_update_latest(const char *response) {
 static void reminders_save_to_persist(void) {
     persist_write_int(PERSIST_REM_COUNT, s_rem_count);
     for (int i = 0; i < s_rem_count; i++) {
-        ReminderEntry e;
-        memset(&e, 0, sizeof(e));
-        strncpy(e.text, s_rem_text[i], REMINDER_TEXT_LEN - 1);
-        e.timestamp = s_rem_ts[i];
-        persist_write_data((uint32_t)(PERSIST_REM_BASE + i), &e, sizeof(e));
+        memset(&s_rem_entry_buf, 0, sizeof(s_rem_entry_buf));
+        strncpy(s_rem_entry_buf.text, s_rem_text[i], REMINDER_TEXT_LEN - 1);
+        s_rem_entry_buf.timestamp = s_rem_ts[i];
+        persist_write_data((uint32_t)(PERSIST_REM_BASE + i), &s_rem_entry_buf, sizeof(s_rem_entry_buf));
     }
 }
 
@@ -281,10 +284,9 @@ static void reminders_load_from_persist(void) {
     for (int i = 0; i < n; i++) {
         uint32_t key = (uint32_t)(PERSIST_REM_BASE + i);
         if (!persist_exists(key)) continue;
-        ReminderEntry e;
-        if (persist_read_data(key, &e, sizeof(e)) < 0) continue;
-        strncpy(s_rem_text[s_rem_count], e.text, REMINDER_TEXT_LEN - 1);
-        s_rem_ts[s_rem_count] = e.timestamp;
+        if (persist_read_data(key, &s_rem_entry_buf, sizeof(s_rem_entry_buf)) < 0) continue;
+        strncpy(s_rem_text[s_rem_count], s_rem_entry_buf.text, REMINDER_TEXT_LEN - 1);
+        s_rem_ts[s_rem_count] = s_rem_entry_buf.timestamp;
         s_rem_count++;
     }
 }
@@ -378,7 +380,7 @@ static void appmsg_send_note(const char *text, bool is_followup) {
     dict_write_int8(iter, MESSAGE_KEY_NOTE_IS_FOLLOWUP, is_followup ? 1 : 0);
     dict_write_int8(iter, MESSAGE_KEY_CLOCK_24H, clock_is_24h_style() ? 1 : 0);
     if (app_message_outbox_send() == APP_MSG_OK) {
-        set_status("Thinking...");
+        set_status("Routing...");
         s_waiting_response = true;
     } else {
         set_status("Send failed");
@@ -404,6 +406,17 @@ static void inbox_received_callback(DictionaryIterator *iter, void *context) {
         APP_LOG(APP_LOG_LEVEL_INFO, "dest_mask=%d", s_dest_mask);
     }
 
+    // ROUTING_DONE — JS has decided destination; update status while waiting
+    Tuple *routing_t = dict_find(iter, MESSAGE_KEY_ROUTING_DONE);
+    if (routing_t) {
+        int dest = (int)routing_t->value->int32;
+        if (dest == DEST_AI) {
+            set_status("Waiting for answer...");
+        } else {
+            set_status("Taking action...");
+        }
+    }
+
     // CONFIRM — note was stored (non-AI destination)
     Tuple *confirm_t = dict_find(iter, MESSAGE_KEY_CONFIRM);
     if (confirm_t) {
@@ -411,13 +424,22 @@ static void inbox_received_callback(DictionaryIterator *iter, void *context) {
         if (ok == 1) {
             Tuple *dest_t = dict_find(iter, MESSAGE_KEY_DEST_USED);
             int dest = dest_t ? (int)dest_t->value->int32 : 0;
-            // Save to local history
-            history_save_item(s_note_buf, NULL, dest);
-            char msg[STATUS_BUF_SIZE];
-            snprintf(msg, sizeof(msg), "Sent → %s ✓", dest_short_name(dest));
-            set_status(msg);
+            if (dest == DEST_LOCAL) {
+                reminders_add(s_note_buf);
+                set_status("Saved locally ✓");
+            } else {
+                history_save_item(s_note_buf, NULL, dest);
+                char msg[STATUS_BUF_SIZE];
+                snprintf(msg, sizeof(msg), "Sent → %s ✓", dest_short_name(dest));
+                set_status(msg);
+            }
         } else {
-            set_status("Error — check phone");
+            Tuple *err_t = dict_find(iter, MESSAGE_KEY_ERROR_MSG);
+            if (err_t && err_t->value->cstring[0]) {
+                set_status(err_t->value->cstring);
+            } else {
+                set_status("Error — check phone");
+            }
         }
         s_waiting_response = false;
     }
@@ -1349,6 +1371,11 @@ static void init(void) {
 
     // Push home window
     home_window_push();
+
+    // If launched via quick launch (long-press from watch face), auto-start dictation
+    if (launch_reason() == APP_LAUNCH_QUICK_LAUNCH) {
+        app_timer_register(400, hist_start_dictation_cb, NULL);
+    }
 }
 
 static void deinit(void) {

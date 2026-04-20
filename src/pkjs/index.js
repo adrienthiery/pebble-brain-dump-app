@@ -56,9 +56,23 @@ function getEnabledDests(cfg) {
     return d;
 }
 
+var TASK_SIGNALS = ['remind me', 'add task', 'add a task', 'to do', 'todo',
+                    "don't forget", "remember to", 'need to', 'have to',
+                    'buy ', 'call ', 'email ', 'schedule', 'appointment',
+                    'meeting', 'pick up', 'book '];
+
+function isTaskLike(text) {
+    var t = text.toLowerCase();
+    for (var i = 0; i < TASK_SIGNALS.length; i++) {
+        if (t.indexOf(TASK_SIGNALS[i]) >= 0) return true;
+    }
+    return false;
+}
+
 function classifyIntent(text, enabled, cfg) {
     if (enabled.length === 0) return null;
-    if (enabled.length === 1) return enabled[0];
+    // Don't shortcut when only AI is enabled — task-like text should go local instead
+    if (enabled.length === 1 && enabled[0] !== 'ai') return enabled[0];
 
     var t = text.toLowerCase();
     var scores = {};
@@ -71,20 +85,23 @@ function classifyIntent(text, enabled, cfg) {
         var phrases = ['explain','tell me','help me','define ','look up',
                        'search for','give me','translate'];
         if (t.charAt(t.length - 1) === '?') scores['ai'] += 3;
+        if (t.indexOf('ask ') === 0) scores['ai'] += 2;  // "Ask what..." or "Ask AI..."
         qw.forEach(function(w) { if (t.indexOf(w) === 0) scores['ai'] += 2; });
         phrases.forEach(function(p) { if (t.indexOf(p) >= 0) scores['ai'] += 1; });
+        // Explicit AI mentions — highest priority
+        if (t.indexOf('a.i.') >= 0 ||
+            t.indexOf(' ai ') >= 0 || t.indexOf('ai ') === 0 ||
+            t.indexOf(' ai,') >= 0 || t.indexOf(' ai.') >= 0) {
+            scores['ai'] += 4;
+        }
     }
 
     // Task signals
     if (scores['tasks'] !== undefined) {
-        var tp = ['remind me','add task','add a task','to do','todo',
-                  "don't forget","remember to",'need to','have to',
-                  'buy ','call ','email ','schedule','appointment',
-                  'meeting','pick up','book '];
         var tw = ['tomorrow','tonight','today','monday','tuesday','wednesday',
                   'thursday','friday','saturday','sunday',
                   'next week','this week','next month','by '];
-        tp.forEach(function(p) { if (t.indexOf(p) >= 0) scores['tasks'] += 2; });
+        TASK_SIGNALS.forEach(function(p) { if (t.indexOf(p) >= 0) scores['tasks'] += 2; });
         tw.forEach(function(w) { if (t.indexOf(w) >= 0) scores['tasks'] += 1; });
     }
 
@@ -271,8 +288,10 @@ function sendToAI(text, isFollowup, cfg, cb) {
         temperature: 0.7
     };
 
+    var endpoint = baseUrl + '/chat/completions';
+    console.log('AI request → ' + endpoint + ' (model: ' + model + ')');
     var xhr = new XMLHttpRequest();
-    xhr.open('POST', baseUrl + '/chat/completions');
+    xhr.open('POST', endpoint);
     xhr.setRequestHeader('Content-Type', 'application/json');
     if (apiKey) xhr.setRequestHeader('Authorization', 'Bearer ' + apiKey);
     xhr.onload = function() {
@@ -341,28 +360,49 @@ function sendToWebhook(text, cfg, cb) {
 // ROUTER
 // ============================================================================
 
-var DEST_INDEX = { tasks: 0, notion: 1, ai: 2, webhook: 3 };
+var DEST_INDEX = { tasks: 0, notion: 1, ai: 2, webhook: 3, local: 4 };
 
 function routeAndSend(text, isFollowup) {
     var cfg     = getConfig();
     var enabled = getEnabledDests(cfg);
-    if (enabled.length === 0) {
-        sendToWatch({ CONFIRM: 2 });
+
+    // Default destination (used when routing_auto is off, or no cloud services enabled)
+    var defaultDest = cfg.default_dest || 'local';
+
+    // If no cloud services are configured and default is not local, go local
+    if (enabled.length === 0 && !isFollowup) {
+        sendToWatch({ ROUTING_DONE: 4 });
+        sendToWatch({ CONFIRM: 1, DEST_USED: 4 });
         return;
     }
 
     var dest = isFollowup ? 'ai'
              : (cfg.routing_auto !== false)
                ? classifyIntent(text, enabled, cfg)
-               : (cfg.default_dest || enabled[0]);
+               : defaultDest;
 
-    var di = DEST_INDEX[dest] !== undefined ? DEST_INDEX[dest] : 0;
+    // classifyIntent may return cfg.default_dest when no signal — honour 'local'
+    if (!dest) dest = defaultDest;
+
+    // Task/reminder signals must never go to AI — redirect to tasks (if enabled) or local
+    if (dest === 'ai' && !isFollowup && isTaskLike(text)) {
+        dest = enabled.indexOf('tasks') >= 0 ? 'tasks' : 'local';
+    }
+
+    var di = DEST_INDEX[dest] !== undefined ? DEST_INDEX[dest] : 4;
     console.log('Brain Dump route: "' + text.substring(0, 40) + '..." → ' + dest);
+
+    // Tell the watch which destination was chosen so it can show the right status
+    sendToWatch({ ROUTING_DONE: di });
+
+    var DEST_LABEL = { tasks: 'Tasks', notion: 'Notion', ai: 'AI', webhook: 'Webhook', local: 'Local' };
 
     function onResult(ok, data) {
         if (!ok) {
             console.log('Send failed: ' + data);
-            sendToWatch({ CONFIRM: 2 });
+            var label = DEST_LABEL[dest] || dest;
+            var msg = (label + ': ' + (data || 'Unknown error')).substring(0, 45);
+            sendToWatch({ CONFIRM: 2, ERROR_MSG: msg });
             return;
         }
         addHistory(text, di);
@@ -378,6 +418,7 @@ function routeAndSend(text, isFollowup) {
         case 'notion':  sendToNotion (text, cfg, onResult); break;
         case 'ai':      sendToAI     (text, isFollowup, cfg, onResult); break;
         case 'webhook': sendToWebhook(text, cfg, onResult); break;
+        case 'local':   onResult(true, 'local'); break;  // save on-watch, no network call
         default:        sendToWatch({ CONFIRM: 2 });
     }
 }
@@ -469,6 +510,7 @@ Pebble.addEventListener('showConfiguration', function() {
     '<span>Smart routing (NLP)</span></label>' +
     '<label>Default destination:' +
     '<select id="default_dest">' +
+    '<option value="local"   ' + sel(cfg.default_dest || 'local','local')   + '>Local Reminders (on-watch)</option>' +
     '<option value="tasks"   ' + sel(cfg.default_dest,'tasks')   + '>Google Tasks</option>' +
     '<option value="notion"  ' + sel(cfg.default_dest,'notion')  + '>Notion</option>' +
     '<option value="ai"      ' + sel(cfg.default_dest,'ai')      + '>AI Agent</option>' +
