@@ -86,6 +86,9 @@ static TextLayer *s_hint_up_layer;
 static TextLayer *s_hint_select_layer;
 static TextLayer *s_hint_down_layer;
 
+// Home layout constants
+#define HOME_BANNER_W 58
+
 // --- Response window layers ---
 static TextLayer  *s_resp_header_layer;
 static ScrollLayer *s_resp_scroll_layer;
@@ -609,7 +612,9 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
     graphics_context_set_fill_color(ctx, GColorBlack);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 
-    int cx = bounds.size.w / 2;
+    int content_w = bounds.size.w - HOME_BANNER_W;
+    if (content_w < 20) content_w = bounds.size.w;
+    int cx = content_w / 2;
 
     // Align brain centre with the SELECT button (Dump) at 47% of screen height
     int brain_cx = cx;
@@ -624,6 +629,11 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
         graphics_context_set_fill_color(ctx, C_ACCENT);
         graphics_fill_circle(ctx, GPoint(bounds.size.w - 8, 8), 4);
     }
+
+    // White right-side banner for action labels
+    int banner_x = bounds.size.w - HOME_BANNER_W;
+    graphics_context_set_fill_color(ctx, GColorWhite);
+    graphics_fill_rect(ctx, GRect(banner_x, 0, HOME_BANNER_W, bounds.size.h), 0, GCornerNone);
 }
 
 static void home_select_click(ClickRecognizerRef rec, void *ctx) {
@@ -659,9 +669,11 @@ static void home_window_load(Window *window) {
     layer_set_update_proc(s_canvas_layer, canvas_update_proc);
     layer_add_child(root, s_canvas_layer);
 
-    // Status line — sits below mic
+    // Status line — centered in left content area
+    int content_w = b.size.w - HOME_BANNER_W;
+    if (content_w < 20) content_w = b.size.w;
     int status_y = b.size.h / 2 + 52;
-    s_status_layer = text_layer_create(GRect(4, status_y, b.size.w - 8, 20));
+    s_status_layer = text_layer_create(GRect(4, status_y, content_w - 8, 20));
     text_layer_set_background_color(s_status_layer, GColorClear);
     text_layer_set_text_color(s_status_layer, C_STATUS);
     text_layer_set_font(s_status_layer,
@@ -670,43 +682,45 @@ static void home_window_load(Window *window) {
     text_layer_set_text(s_status_layer, "Ready");
     layer_add_child(root, text_layer_get_layer(s_status_layer));
 
-    // Right-side action labels — proportional to screen height so they align
+    // Right-side action labels in white banner — proportional to screen height so they align
     // with physical buttons on all models (emery 228px, basalt/diorite 168px, chalk 180px).
-    // Round displays need extra inset so labels don't fall in the clipped corners.
-    #define HINT_W 70
+    // Round displays get a small inset to avoid clipped corners.
+    #define HINT_W (HOME_BANNER_W - 8)
     #define HINT_H 16
+    #define HINT_UP_H 42
+    #define HINT_DOWN_H 28
 #ifdef PBL_ROUND
-    #define HINT_MARGIN 22
+    #define HINT_MARGIN 4
 #else
-    #define HINT_MARGIN 2
+    #define HINT_MARGIN 0
 #endif
-    #define HINT_X (b.size.w - HINT_W - HINT_MARGIN)
+    #define HINT_X (b.size.w - HOME_BANNER_W + 4 + HINT_MARGIN)
     int btn_up_y     = b.size.h * 18 / 100;   // UP:     ~18% from top
     int btn_select_y = b.size.h * 47 / 100;   // SELECT: ~47% from top
     int btn_down_y   = b.size.h * 75 / 100;   // DOWN:   ~75% from top
 
-    s_hint_up_layer = text_layer_create(GRect(HINT_X, btn_up_y, HINT_W, HINT_H));
+    s_hint_up_layer = text_layer_create(GRect(HINT_X, btn_up_y - 12, HINT_W, HINT_UP_H));
     text_layer_set_background_color(s_hint_up_layer, GColorClear);
-    text_layer_set_text_color(s_hint_up_layer, C_HINT);
+    text_layer_set_text_color(s_hint_up_layer, GColorBlack);
     text_layer_set_font(s_hint_up_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
-    text_layer_set_text_alignment(s_hint_up_layer, GTextAlignmentRight);
-    text_layer_set_text(s_hint_up_layer, "History");
+    text_layer_set_text_alignment(s_hint_up_layer, GTextAlignmentCenter);
+    text_layer_set_text(s_hint_up_layer, "Past\nsmart\nactions");
     layer_add_child(root, text_layer_get_layer(s_hint_up_layer));
 
     s_hint_select_layer = text_layer_create(GRect(HINT_X, btn_select_y, HINT_W, HINT_H));
     text_layer_set_background_color(s_hint_select_layer, GColorClear);
-    text_layer_set_text_color(s_hint_select_layer, C_ACCENT);
+    text_layer_set_text_color(s_hint_select_layer, GColorRed);
     text_layer_set_font(s_hint_select_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
-    text_layer_set_text_alignment(s_hint_select_layer, GTextAlignmentRight);
+    text_layer_set_text_alignment(s_hint_select_layer, GTextAlignmentCenter);
     text_layer_set_text(s_hint_select_layer, "Dump");
     layer_add_child(root, text_layer_get_layer(s_hint_select_layer));
 
-    s_hint_down_layer = text_layer_create(GRect(HINT_X, btn_down_y, HINT_W, HINT_H));
+    s_hint_down_layer = text_layer_create(GRect(HINT_X, btn_down_y - 6, HINT_W, HINT_DOWN_H));
     text_layer_set_background_color(s_hint_down_layer, GColorClear);
-    text_layer_set_text_color(s_hint_down_layer, C_HINT);
+    text_layer_set_text_color(s_hint_down_layer, GColorBlack);
     text_layer_set_font(s_hint_down_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
-    text_layer_set_text_alignment(s_hint_down_layer, GTextAlignmentRight);
-    text_layer_set_text(s_hint_down_layer, "Notes");
+    text_layer_set_text_alignment(s_hint_down_layer, GTextAlignmentCenter);
+    text_layer_set_text(s_hint_down_layer, "Local\nnotes");
     layer_add_child(root, text_layer_get_layer(s_hint_down_layer));
 
     window_set_click_config_provider(window, home_click_config);
@@ -991,7 +1005,7 @@ static void history_window_load(Window *window) {
         text_layer_set_font(s_hist_empty_label,
                             fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
         text_layer_set_text_alignment(s_hist_empty_label, GTextAlignmentCenter);
-        text_layer_set_text(s_hist_empty_label, "No notes yet");
+        text_layer_set_text(s_hist_empty_label, "No smart actions yet");
         layer_add_child(root, text_layer_get_layer(s_hist_empty_label));
 
         s_hist_empty_hint = text_layer_create(
@@ -1017,7 +1031,7 @@ static void history_window_load(Window *window) {
     }
 
     s_history_section = (SimpleMenuSection) {
-        .title     = "Recent Notes",
+        .title     = "Past smart actions",
         .items     = s_history_items,
         .num_items = (uint32_t)s_history_count,
     };
@@ -1102,7 +1116,7 @@ static void reminders_list_build_ui(Window *window) {
         text_layer_set_font(s_rem_empty_label,
                             fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
         text_layer_set_text_alignment(s_rem_empty_label, GTextAlignmentCenter);
-        text_layer_set_text(s_rem_empty_label, "No reminders");
+        text_layer_set_text(s_rem_empty_label, "No local notes");
         layer_add_child(root, text_layer_get_layer(s_rem_empty_label));
 
         s_rem_empty_hint = text_layer_create(GRect(0, b.size.h - 22, b.size.w, 22));
@@ -1125,7 +1139,7 @@ static void reminders_list_build_ui(Window *window) {
             };
         }
         s_rem_section = (SimpleMenuSection) {
-            .title     = "Reminders",
+            .title     = "Recent local notes",
             .items     = s_rem_items,
             .num_items = (uint32_t)s_rem_count,
         };

@@ -5,6 +5,11 @@
 var KEY_CONFIG  = 'brain_dump_cfg_v1';
 var KEY_HISTORY = 'brain_dump_hist_v1';
 
+var TASKS_CLIENT_ID = '122599459809-1egpb0mrc97lpeh6fshnfv1i1drnvnkd.apps.googleusercontent.com';
+// secrets.js is gitignored; secrets.example.js is the committed placeholder.
+var TASKS_CLIENT_SECRET = '';
+try { TASKS_CLIENT_SECRET = require('./secrets') || ''; } catch(e) {}
+
 var DEFAULT_SYSTEM_PROMPT =
     '/no_think You are a concise assistant displayed on a Pebble smartwatch ' +
     'with a very small screen. Reply in 1-2 short sentences only. ' +
@@ -100,7 +105,8 @@ function classifyIntent(text, enabled, cfg) {
     if (scores['tasks'] !== undefined) {
         var tw = ['tomorrow','tonight','today','monday','tuesday','wednesday',
                   'thursday','friday','saturday','sunday',
-                  'next week','this week','next month','by '];
+                  'next week','this week','next month','by ',
+                  'noon','midnight',"o'clock",' am',' pm'];
         TASK_SIGNALS.forEach(function(p) { if (t.indexOf(p) >= 0) scores['tasks'] += 2; });
         tw.forEach(function(w) { if (t.indexOf(w) >= 0) scores['tasks'] += 1; });
     }
@@ -137,12 +143,29 @@ function classifyIntent(text, enabled, cfg) {
 // GOOGLE TASKS
 // ============================================================================
 
+function extractTime(text) {
+    var t = text.toLowerCase();
+    if (t.indexOf('noon') >= 0) return { h: 12, m: 0 };
+    if (t.indexOf('midnight') >= 0) return { h: 0, m: 0 };
+    var m = t.match(/\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)/);
+    if (!m) m = t.match(/(\d{1,2})(?::(\d{2}))?\s*o'?clock/);
+    if (!m) return null;
+    var h = parseInt(m[1], 10);
+    var min = m[2] ? parseInt(m[2], 10) : 0;
+    var ampm = m[3];
+    if (ampm === 'pm' && h < 12) h += 12;
+    if (ampm === 'am' && h === 12) h = 0;
+    return { h: h, m: min };
+}
+
 function extractDueDate(text) {
     var t = text.toLowerCase();
     var now = new Date(), d = null;
 
     if (t.indexOf('tomorrow') >= 0) {
         d = new Date(now); d.setDate(d.getDate() + 1);
+    } else if (t.indexOf('today') >= 0 || t.indexOf('tonight') >= 0) {
+        d = new Date(now);
     } else {
         var days = ['sunday','monday','tuesday','wednesday',
                     'thursday','friday','saturday'];
@@ -155,11 +178,13 @@ function extractDueDate(text) {
             }
         }
     }
+    // If only a time is mentioned (no date), default to today
+    if (!d && extractTime(text)) d = new Date(now);
     return d ? d.toISOString().split('T')[0] + 'T00:00:00.000Z' : null;
 }
 
 function refreshGoogleToken(cfg, cb) {
-    if (!cfg.tasks_refresh_token || !cfg.tasks_client_id) { cb(null); return; }
+    if (!cfg.tasks_refresh_token) { cb(null); return; }
     var xhr = new XMLHttpRequest();
     xhr.open('POST', 'https://oauth2.googleapis.com/token');
     xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
@@ -171,8 +196,8 @@ function refreshGoogleToken(cfg, cb) {
     xhr.send(
         'grant_type=refresh_token' +
         '&refresh_token=' + encodeURIComponent(cfg.tasks_refresh_token) +
-        '&client_id='     + encodeURIComponent(cfg.tasks_client_id) +
-        '&client_secret=' + encodeURIComponent(cfg.tasks_client_secret || '')
+        '&client_id='     + encodeURIComponent(TASKS_CLIENT_ID) +
+        '&client_secret=' + encodeURIComponent(TASKS_CLIENT_SECRET)
     );
 }
 
@@ -184,6 +209,11 @@ function sendToTasks(text, cfg, cb) {
     var task = { title: text };
     var due = extractDueDate(text);
     if (due) task.due = due;
+    var time = extractTime(text);
+    if (time) {
+        function pad(n) { return n < 10 ? '0' + n : '' + n; }
+        task.notes = 'Due at ' + pad(time.h) + ':' + pad(time.m);
+    }
 
     function doPost(accessToken) {
         var xhr = new XMLHttpRequest();
@@ -471,6 +501,24 @@ Pebble.addEventListener('appmessage', function(e) {
 Pebble.addEventListener('showConfiguration', function() {
     var cfg = getConfig();
 
+    // Restore or generate PKCE verifier — persisted in localStorage so the verifier
+    // survives the user leaving settings, opening Chrome, signing in, and coming back.
+    var pVer;
+    try { pVer = localStorage.getItem('brain_dump_pkce_v'); } catch(e) {}
+    if (!pVer) {
+        var pCh = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
+        pVer = '';
+        for (var vi = 0; vi < 64; vi++) pVer += pCh[Math.floor(Math.random() * pCh.length)];
+        try { localStorage.setItem('brain_dump_pkce_v', pVer); } catch(e) {}
+    }
+    var pUrl = 'https://accounts.google.com/o/oauth2/v2/auth' +
+        '?client_id=' + encodeURIComponent(TASKS_CLIENT_ID) +
+        '&redirect_uri=http%3A%2F%2Flocalhost' +
+        '&response_type=code' +
+        '&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Ftasks' +
+        '&code_challenge=' + encodeURIComponent(pVer) +
+        '&code_challenge_method=plain&access_type=offline&prompt=consent';
+
     function esc(s) { return (s || '').replace(/'/g, "\\'"); }
     function chk(v) { return v ? 'checked' : ''; }
     function sel(a, b) { return a === b ? 'selected' : ''; }
@@ -478,7 +526,7 @@ Pebble.addEventListener('showConfiguration', function() {
     var html = '<!DOCTYPE html><html><head>' +
     '<meta name="viewport" content="width=device-width,initial-scale=1">' +
     '<style>' +
-    'body{font-family:sans-serif;background:#111;color:#eee;padding:16px;margin:0}' +
+    'body{font-family:sans-serif;background:#111;color:#eee;padding:16px;padding-bottom:68px;margin:0}' +
     'h2{color:#f90;margin:0 0 16px}' +
     'h3{color:#aaa;font-size:14px;margin:14px 0 6px;text-transform:uppercase}' +
     'label{display:flex;align-items:center;gap:8px;margin:6px 0;font-size:14px}' +
@@ -493,6 +541,7 @@ Pebble.addEventListener('showConfiguration', function() {
     'border-radius:4px;font-size:16px;font-weight:bold;margin-top:16px;cursor:pointer}' +
     '.note{font-size:11px;color:#666;margin:4px 0}' +
     'a{color:#f90}' +
+    '.save-bar{position:fixed;bottom:0;left:0;width:100%;padding:12px 16px;background:#111;box-sizing:border-box;z-index:100}' +
     '</style></head><body>' +
 
     '<h2>Brain Dump</h2>' +
@@ -523,13 +572,31 @@ Pebble.addEventListener('showConfiguration', function() {
     '<label class="toggle-label"><input type="checkbox" id="tasks_enabled" ' + chk(cfg.tasks_enabled) + '>' +
     ' Google Tasks</label>' +
     '<div class="fields">' +
-    '<p class="note">Requires a Google OAuth access token. Get one from ' +
-    '<a href="https://developers.google.com/oauthplayground" target="_blank">OAuth Playground</a> ' +
-    'with scope <code>https://www.googleapis.com/auth/tasks</code>.</p>' +
-    'Access token:<input type="password" id="tasks_access_token" value=\'' + esc(cfg.tasks_access_token) + '\'>' +
-    'Refresh token (optional):<input type="text" id="tasks_refresh_token" value=\'' + esc(cfg.tasks_refresh_token) + '\'>' +
-    'Client ID (for refresh):<input type="text" id="tasks_client_id" value=\'' + esc(cfg.tasks_client_id) + '\'>' +
-    'Task list ID (blank = default):<input type="text" id="tasks_list_id" value=\'' + esc(cfg.tasks_list_id) + '\'>' +
+    (cfg.tasks_access_token
+      ? '<div style="display:flex;align-items:center;gap:10px;margin:6px 0 10px">' +
+        '<span style="font-size:13px;color:#4c4">&#10003; Connected</span>' +
+        '<button type="button" onclick="disconnectGoogle()" style="width:auto;padding:4px 12px;font-size:13px;margin:0;background:#666">Disconnect</button>' +
+        '</div>'
+      : '<div id="tasks_connect_ui">' +
+        '<p class="note" style="margin:8px 0 6px;line-height:1.6">' +
+        '<b>How to connect:</b><br>' +
+        '1. Copy the URL below and open it in Chrome or Safari.<br>' +
+        '2. Sign in with Google and grant Tasks access.<br>' +
+        '3. Your browser redirects to a page that fails to load — that\'s expected.<br>' +
+        '4. Copy the full URL from the address bar (starts with <code>http://localhost/</code>).<br>' +
+        '5. Come back here, paste it below, and tap <b>Connect</b>.</p>' +
+        'Step 1 — Google sign-in URL:<input type="text" id="tasks_auth_url" readonly value="' + pUrl + '" ' +
+        'style="font-size:10px;color:#aaa;background:#111;border-color:#555">' +
+        '<button type="button" id="tasks_copy_btn" onclick="copyAuthUrl()" ' +
+        'style="width:auto;padding:6px 14px;font-size:13px;margin:4px 0 12px">Copy URL</button>' +
+        '<br>Step 5 — Paste redirect URL:<input type="text" id="tasks_redirect_url" placeholder="http://localhost/?code=...">' +
+        '<button type="button" id="tasks_exchange_btn" onclick="exchangeCode()" ' +
+        'style="width:auto;padding:6px 14px;font-size:13px;margin:4px 0 10px">Connect</button>' +
+        '</div>') +
+    '<input type="hidden" id="tasks_access_token" value=\'' + esc(cfg.tasks_access_token) + '\'>' +
+    '<input type="hidden" id="tasks_refresh_token" value=\'' + esc(cfg.tasks_refresh_token) + '\'>' +
+    '<input type="hidden" id="pkce_verifier" value=\'' + esc(pVer) + '\'>' +
+    '<br>Task list:<select id="tasks_list_id"><option value="">Loading...</option></select>' +
     '</div></div>' +
 
     // ---- Notion ----
@@ -582,7 +649,7 @@ Pebble.addEventListener('showConfiguration', function() {
     ' value=\'' + esc(cfg.webhook_keywords) + '\' placeholder="send, post, hook">' +
     '</div></div>' +
 
-    '<button onclick="save()">Save</button>' +
+    '<div class="save-bar"><button onclick="save()">Save</button></div>' +
 
     '<script>' +
     'var PRESETS={' +
@@ -600,15 +667,95 @@ Pebble.addEventListener('showConfiguration', function() {
     'if(pr.model)document.getElementById("ai_model").value=pr.model;' +
     'document.getElementById("nvidia_note").style.display=p==="nvidia"?"block":"none";' +
     '}' +
+    // Google OAuth PKCE — verifier is baked into the auth URL at render time
+    // and stored in a hidden input; no in-page JS needed to generate it.
+    'var G_CID="122599459809-1egpb0mrc97lpeh6fshnfv1i1drnvnkd.apps.googleusercontent.com";' +
+    'var G_SECRET="' + TASKS_CLIENT_SECRET + '";' +
+    'function fetchTaskLists(token){' +
+      'var sel=document.getElementById("tasks_list_id");' +
+      'var xhr=new XMLHttpRequest();' +
+      'xhr.open("GET","https://tasks.googleapis.com/tasks/v1/users/@me/lists?maxResults=100");' +
+      'xhr.setRequestHeader("Authorization","Bearer "+token);' +
+      'xhr.onload=function(){' +
+        'try{' +
+          'var r=JSON.parse(this.responseText);' +
+          'if(!r.items){sel.innerHTML=\'<option value="">Default list</option>\';return;}' +
+          'var saved="' + esc(cfg.tasks_list_id) + '";' +
+          'sel.innerHTML=r.items.map(function(l){' +
+            'return\'<option value="\'+l.id+\'"\'+(l.id===saved?\' selected\':\'\')+\'>\'+l.title+\'</option>\';' +
+          '}).join("");' +
+        '}catch(e){sel.innerHTML=\'<option value="">Default list</option>\';}' +
+      '};' +
+      'xhr.onerror=function(){sel.innerHTML=\'<option value="">Default list</option>\';};' +
+      'xhr.send();' +
+    '}' +
+    'window.addEventListener("load",function(){' +
+      'var tok=document.getElementById("tasks_access_token").value;' +
+      'if(tok)fetchTaskLists(tok);' +
+      'else document.getElementById("tasks_list_id").innerHTML=\'<option value="">Default list</option>\';' +
+    '});' +
+    'function copyAuthUrl(){' +
+      'var el=document.getElementById("tasks_auth_url");' +
+      'el.select();el.setSelectionRange(0,9999);' +
+      'var ok=false;try{ok=document.execCommand("copy");}catch(e){}' +
+      'var btn=document.getElementById("tasks_copy_btn");' +
+      'btn.textContent=ok?"Copied!":"Long-press to copy";' +
+      'setTimeout(function(){btn.textContent="Copy URL";},2000);' +
+    '}' +
+    'function exchangeCode(){' +
+      'var url=document.getElementById("tasks_redirect_url").value.trim();' +
+      'var m=url.match(/[?&]code=([^&]+)/);' +
+      'if(!m){alert("Paste the full redirect URL (starts with http://localhost/?code=)");return;}' +
+      'var code=decodeURIComponent(m[1]);' +
+      'var verifier=document.getElementById("pkce_verifier").value;' +
+      'var btn=document.getElementById("tasks_exchange_btn");' +
+      'btn.disabled=true;btn.textContent="Connecting...";' +
+      'var xhr=new XMLHttpRequest();' +
+      'xhr.open("POST","https://oauth2.googleapis.com/token");' +
+      'xhr.setRequestHeader("Content-Type","application/x-www-form-urlencoded");' +
+      'xhr.onload=function(){' +
+        'var r;try{r=JSON.parse(this.responseText);}' +
+        'catch(e){alert("Parse error");btn.disabled=false;btn.textContent="Connect";return;}' +
+        'if(r&&r.access_token){' +
+          'document.getElementById("tasks_access_token").value=r.access_token;' +
+          'document.getElementById("tasks_refresh_token").value=r.refresh_token||"";' +
+          'document.getElementById("tasks_enabled").checked=true;' +
+          'try{localStorage.removeItem("brain_dump_pkce_v");}catch(e){}' +
+          'var connectUi=document.getElementById("tasks_connect_ui");' +
+          'if(connectUi){' +
+            'connectUi.innerHTML=\'<div style="display:flex;align-items:center;gap:10px;margin:6px 0 10px"><span style="font-size:13px;color:#4c4">&#10003; Connected</span><button type="button" onclick="disconnectGoogle()" style="width:auto;padding:4px 12px;font-size:13px;margin:0;background:#666">Disconnect</button></div>\';' +
+          '}' +
+          'fetchTaskLists(r.access_token);' +
+          'btn.disabled=false;btn.textContent="Connect";' +
+          'alert("Google Tasks connected. Choose your task list, then tap Save.");' +
+        '}else{' +
+          'alert("Error: "+(r.error_description||r.error||"Token exchange failed"));' +
+          'btn.disabled=false;btn.textContent="Connect";}' +
+      '};' +
+      'xhr.onerror=function(){alert("Network error");btn.disabled=false;btn.textContent="Connect";};' +
+      'xhr.send(' +
+        '"grant_type=authorization_code" +' +
+        '"&code="+encodeURIComponent(code) +' +
+        '"&client_id="+encodeURIComponent(G_CID) +' +
+        '"&redirect_uri=http%3A%2F%2Flocalhost" +' +
+        '"&code_verifier="+encodeURIComponent(verifier) +' +
+        '"&client_secret="+encodeURIComponent(G_SECRET)' +
+      ');' +
+    '}' +
+    'function disconnectGoogle(){' +
+      'document.getElementById("tasks_access_token").value="";' +
+      'document.getElementById("tasks_refresh_token").value="";' +
+      'document.getElementById("tasks_enabled").checked=false;' +
+      'save();' +
+    '}' +
     'function save(){' +
     'var c={' +
     'metric_units:document.getElementById("metric_units").checked,' +
     'routing_auto:document.getElementById("routing_auto").checked,' +
     'default_dest:document.getElementById("default_dest").value,' +
     'tasks_enabled:document.getElementById("tasks_enabled").checked,' +
-    'tasks_access_token:document.getElementById("tasks_access_token").value.trim(),' +
-    'tasks_refresh_token:document.getElementById("tasks_refresh_token").value.trim(),' +
-    'tasks_client_id:document.getElementById("tasks_client_id").value.trim(),' +
+    'tasks_access_token:document.getElementById("tasks_access_token").value,' +
+    'tasks_refresh_token:document.getElementById("tasks_refresh_token").value,' +
     'tasks_list_id:document.getElementById("tasks_list_id").value.trim(),' +
     'notion_enabled:document.getElementById("notion_enabled").checked,' +
     'notion_token:document.getElementById("notion_token").value.trim(),' +
