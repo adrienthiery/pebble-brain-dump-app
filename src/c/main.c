@@ -88,6 +88,10 @@ static TextLayer *s_hint_down_layer;
 
 // Home layout constants
 #define HOME_BANNER_W 58
+// Round banner is drawn as an arc with graphics_fill_radial, so it follows
+// the bezel curvature natively — no horizontal/vertical inset needed.
+#define HOME_BANNER_INSET_X 0
+#define HOME_BANNER_INSET_Y 0
 
 // --- Response window layers ---
 static TextLayer  *s_resp_header_layer;
@@ -609,31 +613,44 @@ static void draw_mic_icon(GContext *ctx, GPoint center, int scale) {
 static void canvas_update_proc(Layer *layer, GContext *ctx) {
     GRect bounds = layer_get_bounds(layer);
 
+    // 1. Black background
     graphics_context_set_fill_color(ctx, GColorBlack);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 
-    int content_w = bounds.size.w - HOME_BANNER_W;
+    // 2. White crescent banner (drawn before icons so icons paint on top)
+#ifdef PBL_ROUND
+    // Crescent = screen ∩ complement(big circle).
+    // Fill whole screen white, then stamp big black circle to the left — leaves
+    // only the right crescent white.
+    {
+        int R = bounds.size.w / 2;
+        graphics_context_set_fill_color(ctx, GColorWhite);
+        graphics_fill_circle(ctx, GPoint(R, R), (uint16_t)R);
+        graphics_context_set_fill_color(ctx, GColorBlack);
+        graphics_fill_circle(ctx, GPoint(-R * 27 / 100, R), (uint16_t)(R * 150 / 100));
+    }
+#else
+    {
+        graphics_context_set_fill_color(ctx, GColorWhite);
+        int banner_x = bounds.size.w - HOME_BANNER_W;
+        graphics_fill_rect(ctx, GRect(banner_x, 0, HOME_BANNER_W, bounds.size.h), 0, GCornerNone);
+    }
+#endif
+
+    int content_w = bounds.size.w - HOME_BANNER_W - HOME_BANNER_INSET_X;
     if (content_w < 20) content_w = bounds.size.w;
     int cx = content_w / 2;
 
-    // Align brain centre with the SELECT button (Dump) at 47% of screen height
+    // 3. Brain + mic icons on top
     int brain_cx = cx;
     int brain_cy = bounds.size.h * 50 / 100;
     draw_brain_icon(ctx, GPoint(brain_cx, brain_cy), 150);
-
-    // Mic: small badge anchored at the brain's bottom-right corner
-    //   Brain bottom-right at scale=150: (+17, +14) from brain centre
     draw_mic_icon(ctx, GPoint(brain_cx + 18, brain_cy + 14), 55);
 
     if (s_waiting_response) {
         graphics_context_set_fill_color(ctx, C_ACCENT);
         graphics_fill_circle(ctx, GPoint(bounds.size.w - 8, 8), 4);
     }
-
-    // White right-side banner for action labels
-    int banner_x = bounds.size.w - HOME_BANNER_W;
-    graphics_context_set_fill_color(ctx, GColorWhite);
-    graphics_fill_rect(ctx, GRect(banner_x, 0, HOME_BANNER_W, bounds.size.h), 0, GCornerNone);
 }
 
 static void home_select_click(ClickRecognizerRef rec, void *ctx) {
@@ -670,9 +687,9 @@ static void home_window_load(Window *window) {
     layer_add_child(root, s_canvas_layer);
 
     // Status line — centered in left content area
-    int content_w = b.size.w - HOME_BANNER_W;
+    int content_w = b.size.w - HOME_BANNER_W - HOME_BANNER_INSET_X;
     if (content_w < 20) content_w = b.size.w;
-    int status_y = b.size.h / 2 + 52;
+    int status_y = b.size.h / 2 + 36;
     s_status_layer = text_layer_create(GRect(4, status_y, content_w - 8, 20));
     text_layer_set_background_color(s_status_layer, GColorClear);
     text_layer_set_text_color(s_status_layer, C_STATUS);
@@ -682,24 +699,28 @@ static void home_window_load(Window *window) {
     text_layer_set_text(s_status_layer, "Ready");
     layer_add_child(root, text_layer_get_layer(s_status_layer));
 
-    // Right-side action labels in white banner — proportional to screen height so they align
-    // with physical buttons on all models (emery 228px, basalt/diorite 168px, chalk 180px).
-    // Round displays get a small inset to avoid clipped corners.
-    #define HINT_W (HOME_BANNER_W - 8)
-    #define HINT_H 16
-    #define HINT_UP_H 42
+    // Right-side action labels — proportional Y aligns with physical buttons on all models.
+    // Round: labels positioned inside the crescent (big-circle inner edge + small margin).
+    // Rect:  labels inside the flat right banner.
+    #define HINT_H      16
+    #define HINT_UP_H   42
     #define HINT_DOWN_H 28
 #ifdef PBL_ROUND
-    #define HINT_MARGIN 4
+    // SELECT is at the widest part of the crescent (equator).
+    // UP/DOWN are where the crescent narrows — shift them left to stay centred.
+    #define HINT_X       (b.size.w * 68 / 100)
+    #define HINT_X_EDGE  (b.size.w * 60 / 100)
+    #define HINT_W       (b.size.w * 28 / 100)
 #else
-    #define HINT_MARGIN 0
+    #define HINT_X       (b.size.w - HOME_BANNER_W + 4)
+    #define HINT_X_EDGE  HINT_X
+    #define HINT_W       (HOME_BANNER_W - 8)
 #endif
-    #define HINT_X (b.size.w - HOME_BANNER_W + 4 + HINT_MARGIN)
     int btn_up_y     = b.size.h * 18 / 100;   // UP:     ~18% from top
     int btn_select_y = b.size.h * 47 / 100;   // SELECT: ~47% from top
     int btn_down_y   = b.size.h * 75 / 100;   // DOWN:   ~75% from top
 
-    s_hint_up_layer = text_layer_create(GRect(HINT_X, btn_up_y - 12, HINT_W, HINT_UP_H));
+    s_hint_up_layer = text_layer_create(GRect(HINT_X_EDGE, btn_up_y - 12, HINT_W, HINT_UP_H));
     text_layer_set_background_color(s_hint_up_layer, GColorClear);
     text_layer_set_text_color(s_hint_up_layer, GColorBlack);
     text_layer_set_font(s_hint_up_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
@@ -715,7 +736,7 @@ static void home_window_load(Window *window) {
     text_layer_set_text(s_hint_select_layer, "Dump");
     layer_add_child(root, text_layer_get_layer(s_hint_select_layer));
 
-    s_hint_down_layer = text_layer_create(GRect(HINT_X, btn_down_y - 6, HINT_W, HINT_DOWN_H));
+    s_hint_down_layer = text_layer_create(GRect(HINT_X_EDGE, btn_down_y - 6, HINT_W, HINT_DOWN_H));
     text_layer_set_background_color(s_hint_down_layer, GColorClear);
     text_layer_set_text_color(s_hint_down_layer, GColorBlack);
     text_layer_set_font(s_hint_down_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
