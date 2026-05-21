@@ -29,12 +29,14 @@
 #define DEST_AI      2
 #define DEST_WEBHOOK 3
 #define DEST_LOCAL   4   // on-watch reminders list (no phone needed)
+#define DEST_TODOIST 5
 
 // Destination bitmask bits (must match pkjs DEST_MASK)
 #define DEST_BIT_TASKS   (1 << DEST_TASKS)
 #define DEST_BIT_NOTION  (1 << DEST_NOTION)
 #define DEST_BIT_AI      (1 << DEST_AI)
 #define DEST_BIT_WEBHOOK (1 << DEST_WEBHOOK)
+#define DEST_BIT_TODOIST (1 << DEST_TODOIST)
 
 // Color aliases — compile away on B&W platforms
 #ifdef PBL_COLOR
@@ -73,6 +75,7 @@ typedef struct __attribute__((packed)) {
 
 // --- Windows ---
 static Window *s_home_window;
+static Window *s_confirm_window;
 static Window *s_response_window;
 static Window *s_history_window;
 static Window *s_detail_window;
@@ -92,6 +95,16 @@ static TextLayer *s_hint_down_layer;
 // the bezel curvature natively — no horizontal/vertical inset needed.
 #define HOME_BANNER_INSET_X 0
 #define HOME_BANNER_INSET_Y 0
+
+// --- Confirm window ---
+static TextLayer *s_confirm_header_layer;
+static TextLayer *s_confirm_content_layer;
+static TextLayer *s_confirm_target_layer;
+static TextLayer *s_confirm_hint_send_layer;
+static TextLayer *s_confirm_hint_redo_layer;
+static bool       s_confirm_is_followup;
+static bool       s_confirm_open      = false;
+static char       s_confirm_target_buf[32];
 
 // --- Response window layers ---
 static TextLayer  *s_resp_header_layer;
@@ -165,6 +178,7 @@ static char     s_rem_header_buf[32];
 // ============================================================================
 
 static void home_window_push(void);
+static void confirm_window_push(void);
 static void response_window_push(void);
 static void history_window_push(void);
 static void detail_window_push(int idx);
@@ -182,6 +196,7 @@ static const char *dest_short_name(int dest) {
         case DEST_AI:      return "AI";
         case DEST_WEBHOOK: return "Hook";
         case DEST_LOCAL:   return "Local";
+        case DEST_TODOIST: return "Todoist";
         default:           return "?";
     }
 }
@@ -401,6 +416,31 @@ static void appmsg_clear_context(void) {
     app_message_outbox_send();
 }
 
+static void appmsg_classify_note(const char *text) {
+    DictionaryIterator *iter;
+    if (app_message_outbox_begin(&iter) != APP_MSG_OK) return;
+    dict_write_cstring(iter, MESSAGE_KEY_NOTE_TEXT, text);
+    dict_write_int8(iter, MESSAGE_KEY_NOTE_IS_CLASSIFY_ONLY, 1);
+    dict_write_int8(iter, MESSAGE_KEY_CLOCK_24H, clock_is_24h_style() ? 1 : 0);
+    app_message_outbox_send();
+}
+
+static void route_note(bool is_followup) {
+    if (s_dest_mask == 0 && !is_followup) {
+        reminders_add(s_note_buf);
+        set_status("Saved to reminders");
+    } else {
+        if (is_followup) {
+            conv_append_question(s_note_buf);
+            conv_update_display();
+        } else {
+            s_in_ai_thread = false;
+            conv_start(s_note_buf);
+        }
+        appmsg_send_note(s_note_buf, is_followup);
+    }
+}
+
 // ============================================================================
 // APPMESSAGE — INBOX
 // ============================================================================
@@ -413,14 +453,21 @@ static void inbox_received_callback(DictionaryIterator *iter, void *context) {
         APP_LOG(APP_LOG_LEVEL_INFO, "dest_mask=%d", s_dest_mask);
     }
 
-    // ROUTING_DONE — JS has decided destination; update status while waiting
+    // ROUTING_DONE — JS has decided destination
     Tuple *routing_t = dict_find(iter, MESSAGE_KEY_ROUTING_DONE);
     if (routing_t) {
         int dest = (int)routing_t->value->int32;
-        if (dest == DEST_AI) {
-            set_status("Waiting for answer...");
+        if (s_confirm_open && s_confirm_target_layer) {
+            // Classify-only response — update target label on confirm screen
+            snprintf(s_confirm_target_buf, sizeof(s_confirm_target_buf),
+                     "\xe2\x86\x92 %s", dest_short_name(dest));
+            text_layer_set_text(s_confirm_target_layer, s_confirm_target_buf);
         } else {
-            set_status("Taking action...");
+            if (dest == DEST_AI) {
+                set_status("Waiting for answer...");
+            } else {
+                set_status("Taking action...");
+            }
         }
     }
 
@@ -503,20 +550,8 @@ static void dictation_callback(DictationSession *session,
         strncpy(s_note_buf, transcription, NOTE_BUF_SIZE - 1);
         s_note_buf[NOTE_BUF_SIZE - 1] = '\0';
         APP_LOG(APP_LOG_LEVEL_INFO, "Dictation: %s", s_note_buf);
-        if (s_dest_mask == 0 && !is_followup) {
-            // No cloud services configured — save locally as a reminder
-            reminders_add(s_note_buf);
-            set_status("Saved to reminders");
-        } else {
-            if (is_followup) {
-                conv_append_question(s_note_buf);
-                conv_update_display();
-            } else {
-                s_in_ai_thread = false;
-                conv_start(s_note_buf);
-            }
-            appmsg_send_note(s_note_buf, is_followup);
-        }
+        s_confirm_is_followup = is_followup;
+        confirm_window_push();
     } else {
         switch (status) {
             case DictationSessionStatusFailureNoSpeechDetected:
@@ -531,6 +566,111 @@ static void dictation_callback(DictationSession *session,
                 set_status("Dictation failed"); break;
         }
     }
+}
+
+// ============================================================================
+// CONFIRM WINDOW  (review transcription + target before routing)
+// ============================================================================
+
+#define CONFIRM_HINT_W 52
+
+static void confirm_route_cb(void *ctx) {
+    route_note(s_confirm_is_followup);
+}
+
+static void confirm_redo_cb(void *ctx) {
+    s_is_followup = s_confirm_is_followup;
+    dictation_session_start(s_dictation_session);
+}
+
+static void confirm_select_click(ClickRecognizerRef rec, void *ctx) {
+    window_stack_pop(true);
+    app_timer_register(50, confirm_route_cb, NULL);
+}
+
+static void confirm_up_click(ClickRecognizerRef rec, void *ctx) {
+    window_stack_pop(true);
+    app_timer_register(300, confirm_redo_cb, NULL);
+}
+
+static void confirm_click_config(void *ctx) {
+    window_single_click_subscribe(BUTTON_ID_SELECT, confirm_select_click);
+    window_single_click_subscribe(BUTTON_ID_UP,     confirm_up_click);
+}
+
+static void confirm_window_load(Window *window) {
+    Layer *root = window_get_root_layer(window);
+    GRect b = layer_get_bounds(root);
+
+    window_set_background_color(window, GColorBlack);
+
+    int hint_x    = b.size.w - CONFIRM_HINT_W + 2;
+    int hint_w    = CONFIRM_HINT_W - 4;
+    int content_w = b.size.w - CONFIRM_HINT_W - 4;
+
+    // Header "Your note"
+    s_confirm_header_layer = text_layer_create(GRect(4, 2, content_w, 18));
+    text_layer_set_background_color(s_confirm_header_layer, GColorClear);
+    text_layer_set_text_color(s_confirm_header_layer, C_ACCENT);
+    text_layer_set_font(s_confirm_header_layer,
+                        fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
+    text_layer_set_text(s_confirm_header_layer, "Your note");
+    layer_add_child(root, text_layer_get_layer(s_confirm_header_layer));
+
+    // Transcription text (word-wrap)
+    s_confirm_content_layer = text_layer_create(
+        GRect(4, 22, content_w, b.size.h - 52));
+    text_layer_set_background_color(s_confirm_content_layer, GColorClear);
+    text_layer_set_text_color(s_confirm_content_layer, GColorWhite);
+    text_layer_set_font(s_confirm_content_layer,
+                        fonts_get_system_font(FONT_KEY_GOTHIC_18));
+    text_layer_set_overflow_mode(s_confirm_content_layer, GTextOverflowModeWordWrap);
+    text_layer_set_text(s_confirm_content_layer, s_note_buf);
+    layer_add_child(root, text_layer_get_layer(s_confirm_content_layer));
+
+    // Target label at bottom (updated when classify response arrives)
+    snprintf(s_confirm_target_buf, sizeof(s_confirm_target_buf), "\xe2\x86\x92 ?");
+    s_confirm_target_layer = text_layer_create(
+        GRect(4, b.size.h - 26, content_w, 18));
+    text_layer_set_background_color(s_confirm_target_layer, GColorClear);
+    text_layer_set_text_color(s_confirm_target_layer, C_STATUS);
+    text_layer_set_font(s_confirm_target_layer,
+                        fonts_get_system_font(FONT_KEY_GOTHIC_14));
+    text_layer_set_text(s_confirm_target_layer, s_confirm_target_buf);
+    layer_add_child(root, text_layer_get_layer(s_confirm_target_layer));
+
+    // Right-side button hints
+    s_confirm_hint_redo_layer = text_layer_create(
+        GRect(hint_x, b.size.h * 18 / 100, hint_w, 16));
+    text_layer_set_background_color(s_confirm_hint_redo_layer, GColorClear);
+    text_layer_set_text_color(s_confirm_hint_redo_layer, C_HINT);
+    text_layer_set_font(s_confirm_hint_redo_layer,
+                        fonts_get_system_font(FONT_KEY_GOTHIC_14));
+    text_layer_set_text_alignment(s_confirm_hint_redo_layer, GTextAlignmentCenter);
+    text_layer_set_text(s_confirm_hint_redo_layer, "Redo");
+    layer_add_child(root, text_layer_get_layer(s_confirm_hint_redo_layer));
+
+    s_confirm_hint_send_layer = text_layer_create(
+        GRect(hint_x, b.size.h * 47 / 100, hint_w, 16));
+    text_layer_set_background_color(s_confirm_hint_send_layer, GColorClear);
+    text_layer_set_text_color(s_confirm_hint_send_layer, C_ACCENT);
+    text_layer_set_font(s_confirm_hint_send_layer,
+                        fonts_get_system_font(FONT_KEY_GOTHIC_14));
+    text_layer_set_text_alignment(s_confirm_hint_send_layer, GTextAlignmentCenter);
+    text_layer_set_text(s_confirm_hint_send_layer, "Send");
+    layer_add_child(root, text_layer_get_layer(s_confirm_hint_send_layer));
+
+    window_set_click_config_provider(window, confirm_click_config);
+    s_confirm_open = true;
+}
+
+static void confirm_window_unload(Window *window) {
+    text_layer_destroy(s_confirm_header_layer);    s_confirm_header_layer    = NULL;
+    text_layer_destroy(s_confirm_content_layer);   s_confirm_content_layer   = NULL;
+    text_layer_destroy(s_confirm_target_layer);    s_confirm_target_layer    = NULL;
+    text_layer_destroy(s_confirm_hint_send_layer); s_confirm_hint_send_layer = NULL;
+    text_layer_destroy(s_confirm_hint_redo_layer); s_confirm_hint_redo_layer = NULL;
+    s_confirm_open = false;
 }
 
 // ============================================================================
@@ -1313,6 +1453,23 @@ static void home_window_push(void) {
     window_stack_push(s_home_window, true);
 }
 
+static void confirm_window_push(void) {
+    if (s_confirm_window) {
+        window_destroy(s_confirm_window);
+        s_confirm_window = NULL;
+    }
+    s_confirm_window = window_create();
+    window_set_window_handlers(s_confirm_window, (WindowHandlers) {
+        .load   = confirm_window_load,
+        .unload = confirm_window_unload,
+    });
+    window_stack_push(s_confirm_window, true);
+    // Ask phone to classify in parallel so the target label can be shown
+    if (connection_service_peek_pebble_app_connection()) {
+        appmsg_classify_note(s_note_buf);
+    }
+}
+
 static void response_window_push(void) {
     if (s_response_window) {
         window_destroy(s_response_window);
@@ -1422,6 +1579,7 @@ static void deinit(void) {
     if (s_reminders_window)  { window_destroy(s_reminders_window);  }
     if (s_detail_window)     { window_destroy(s_detail_window);     }
     if (s_history_window)    { window_destroy(s_history_window);    }
+    if (s_confirm_window)    { window_destroy(s_confirm_window);    }
     if (s_response_window)   { window_destroy(s_response_window);   }
     if (s_home_window)       { window_destroy(s_home_window);       }
     app_message_deregister_callbacks();

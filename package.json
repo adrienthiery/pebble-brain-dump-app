@@ -1,7 +1,7 @@
 {
   "name": "brain-dump",
   "author": "Adrien THIERY",
-  "version": "1.0.7",
+  "version": "1.0.9",
   "keywords": [
     "pebble-app"
   ],
@@ -43,7 +43,8 @@
       "CLEAR_CONTEXT",
       "CLOCK_24H",
       "ROUTING_DONE",
-      "ERROR_MSG"
+      "ERROR_MSG",
+      "NOTE_IS_CLASSIFY_ONLY"
     ],
     "resources": {
       "media": [

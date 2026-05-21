@@ -55,16 +55,33 @@ function addHistory(text, dest) {
 function getEnabledDests(cfg) {
     var d = [];
     if (cfg.tasks_enabled)   d.push('tasks');
+    if (cfg.todoist_enabled) d.push('todoist');
     if (cfg.notion_enabled)  d.push('notion');
     if (cfg.ai_enabled)      d.push('ai');
     if (cfg.webhook_enabled) d.push('webhook');
     return d;
 }
 
-var TASK_SIGNALS = ['remind me', 'add task', 'add a task', 'to do', 'todo',
-                    "don't forget", "remember to", 'need to', 'have to',
-                    'buy ', 'call ', 'email ', 'schedule', 'appointment',
-                    'meeting', 'pick up', 'book '];
+var TASK_SIGNALS = [
+    // English
+    'remind me', 'add task', 'add a task', 'to do', 'todo',
+    "don't forget", "remember to", 'need to', 'have to',
+    'buy ', 'call ', 'email ', 'schedule', 'appointment', 'meeting', 'pick up', 'book ',
+    // German
+    'erinner', 'aufgabe', 'erinnerung', 'kaufen', 'anrufen', 'nicht vergessen',
+    'muss ', 'termin', 'treffen', 'buchen', 'schick',
+    // French
+    'rappelle', 'tâche', 'tache', "n'oublie pas", 'rappel',
+    'acheter', 'appeler', 'rendez-vous', 'réunion', 'reunion', 'réserver',
+    // Spanish
+    'recuérdame', 'recuerdame', 'tarea', 'no olvides', 'no te olvides',
+    'comprar', 'llamar', 'cita ', 'reunión', 'reunion', 'reservar'
+];
+
+function getCustomKeywords(cfg, dest) {
+    var raw = (cfg[dest + '_keywords'] || '').toLowerCase().split(',');
+    return raw.map(function(k) { return k.trim(); }).filter(function(k) { return k.length > 0; });
+}
 
 function isTaskLike(text) {
     var t = text.toLowerCase();
@@ -85,41 +102,102 @@ function classifyIntent(text, enabled, cfg) {
 
     // AI signals
     if (scores['ai'] !== undefined) {
-        var qw = ['what ','how ','why ','who ','where ','when ','is ','are ','can ',
-                  'could ','should ','will ','would ',"what's","how's"];
-        var phrases = ['explain','tell me','help me','define ','look up',
-                       'search for','give me','translate'];
+        var qw = [
+            // English
+            'what ','how ','why ','who ','where ','when ','is ','are ','can ',
+            'could ','should ','will ','would ',"what's","how's",
+            // German
+            'was ','wie ','warum ','wer ','wo ','wann ','ist ','sind ','kann ',
+            'k\xf6nnte ','sollte ','wird ','w\xfcrde ',
+            // French
+            'quoi ','comment ','pourquoi ','qui ','o\xf9 ','quand ',
+            "qu'est","c'est quoi",'dis-moi',
+            // Spanish
+            'qu\xe9 ','c\xf3mo ','por qu\xe9 ','qui\xe9n ','d\xf3nde ','cu\xe1ndo ','cu\xe1l '
+        ];
+        var phrases = [
+            // English
+            'explain','tell me','help me','define ','look up','search for','give me','translate',
+            // German
+            'erkl\xe4r','sag mir','hilf mir','\xfcbersetze',
+            // French
+            'explique','dis-moi','aide-moi','traduis',
+            // Spanish
+            'explica','d\xedme','ay\xfadame','traduce'
+        ];
         if (t.charAt(t.length - 1) === '?') scores['ai'] += 3;
-        if (t.indexOf('ask ') === 0) scores['ai'] += 2;  // "Ask what..." or "Ask AI..."
+        if (t.indexOf('ask ') === 0) scores['ai'] += 2;
         qw.forEach(function(w) { if (t.indexOf(w) === 0) scores['ai'] += 2; });
         phrases.forEach(function(p) { if (t.indexOf(p) >= 0) scores['ai'] += 1; });
-        // Explicit AI mentions — highest priority
         if (t.indexOf('a.i.') >= 0 ||
             t.indexOf(' ai ') >= 0 || t.indexOf('ai ') === 0 ||
             t.indexOf(' ai,') >= 0 || t.indexOf(' ai.') >= 0) {
             scores['ai'] += 4;
         }
+        getCustomKeywords(cfg, 'ai').forEach(function(k) {
+            if (t.indexOf(k) >= 0) scores['ai'] += 2;
+        });
     }
 
-    // Task signals
+    // Shared date/time modifiers (used by both tasks and todoist)
+    var tw = [
+        'tomorrow','tonight','today','monday','tuesday','wednesday',
+        'thursday','friday','saturday','sunday',
+        'next week','this week','next month','by ','noon','midnight',"o'clock",' am',' pm',
+        'morgen ','heute ','montag','dienstag','mittwoch','donnerstag',
+        'freitag','samstag','sonntag','n\xe4chste woche','diesen monat',
+        'demain','aujourd','lundi','mardi','mercredi','jeudi',
+        'vendredi','samedi','dimanche','semaine prochaine',
+        'ma\xf1ana','hoy ','lunes','martes','mi\xe9rcoles','jueves',
+        'viernes','s\xe1bado','domingo','la semana que viene'
+    ];
+
+    // Task signals — Google Tasks
     if (scores['tasks'] !== undefined) {
-        var tw = ['tomorrow','tonight','today','monday','tuesday','wednesday',
-                  'thursday','friday','saturday','sunday',
-                  'next week','this week','next month','by ',
-                  'noon','midnight',"o'clock",' am',' pm'];
         TASK_SIGNALS.forEach(function(p) { if (t.indexOf(p) >= 0) scores['tasks'] += 2; });
         tw.forEach(function(w) { if (t.indexOf(w) >= 0) scores['tasks'] += 1; });
+        // Google Tasks–specific keywords (disambiguate when Todoist is also enabled)
+        ['google task', 'google tasks', 'add to google', 'gtask'].forEach(function(k) {
+            if (t.indexOf(k) >= 0) scores['tasks'] += 4;
+        });
+        getCustomKeywords(cfg, 'tasks').forEach(function(k) {
+            if (t.indexOf(k) >= 0) scores['tasks'] += 2;
+        });
+    }
+
+    // Task signals — Todoist
+    if (scores['todoist'] !== undefined) {
+        TASK_SIGNALS.forEach(function(p) { if (t.indexOf(p) >= 0) scores['todoist'] += 2; });
+        tw.forEach(function(w) { if (t.indexOf(w) >= 0) scores['todoist'] += 1; });
+        // Todoist-specific keywords
+        ['todoist', 'add to todoist', 'in todoist'].forEach(function(k) {
+            if (t.indexOf(k) >= 0) scores['todoist'] += 4;
+        });
+        getCustomKeywords(cfg, 'todoist').forEach(function(k) {
+            if (t.indexOf(k) >= 0) scores['todoist'] += 2;
+        });
     }
 
     // Notion signals
     if (scores['notion'] !== undefined) {
-        var np = ['note','write down','save this','document','jot',
-                  'record that','add to my notes','log this',
-                  'idea','memo','keep in mind'];
+        var np = [
+            // English
+            'note','write down','save this','document','jot',
+            'record that','add to my notes','log this','idea','memo','keep in mind',
+            // German
+            'notiz','aufschreiben','speichern','idee','festhalten',
+            // French
+            'note','noter','sauvegarder','id\xe9e','conserver',
+            // Spanish
+            'nota','anotar','guardar','idea','apuntar'
+        ];
         np.forEach(function(p) { if (t.indexOf(p) >= 0) scores['notion'] += 2; });
+        getCustomKeywords(cfg, 'notion').forEach(function(k) {
+            if (t.indexOf(k) >= 0) scores['notion'] += 2;
+        });
     }
 
-    // Webhook: user-configured trigger keywords (comma-separated in settings)
+    // Webhook: configured trigger keywords
     if (scores['webhook'] !== undefined) {
         var kw = (cfg.webhook_keywords || '').toLowerCase().split(',');
         kw.forEach(function(k) {
@@ -143,19 +221,207 @@ function classifyIntent(text, enabled, cfg) {
 // GOOGLE TASKS
 // ============================================================================
 
-function extractTime(text) {
+// Number words (English, German, French, Spanish) used in time expressions
+var _NUM_WORDS = {
+    // English
+    'one':1,'two':2,'three':3,'four':4,'five':5,'six':6,
+    'seven':7,'eight':8,'nine':9,'ten':10,'eleven':11,'twelve':12,
+    // German (accented + plain-ASCII variants for voice-to-text)
+    'eins':1,'zwei':2,'drei':3,'vier':4,'f\xfcnf':5,'funf':5,
+    'sechs':6,'sieben':7,'acht':8,'neun':9,'zehn':10,'elf':11,'zw\xf6lf':12,'zwolf':12,
+    // French ('six' already covered by English entry)
+    'une':1,'deux':2,'trois':3,'quatre':4,'cinq':5,
+    'sept':7,'huit':8,'neuf':9,'dix':10,'onze':11,'douze':12,
+    // Spanish ('seis' = 6, same as English 'six' — both map to 6)
+    'dos':2,'cuatro':4,'cinco':5,'seis':6,'siete':7,'ocho':8,
+    'nueve':9,'diez':10,'once':11,'doce':12
+};
+// Alternation pattern — longer words before any that are their prefix
+var _NUM_PAT = [
+    'eleven','twelve','seven','eight','three','four','five','nine','six','ten','two','one',
+    'sieben','sechs','neun','zehn','vier','acht','elf','f\xfcnf','funf','zwei','drei',
+    'eins','zw\xf6lf','zwolf',
+    'quatre','trois','onze','douze','deux','cinq','sept','huit','neuf','dix','une',
+    'cuatro','cinco','siete','ocho','nueve','diez','seis','once','doce','dos'
+].join('|');
+
+// Pick the next occurrence of an ambiguous 12h hour given the current hour.
+// If both AM and PM are still future, prefer the nearer one.
+function disambiguate(h, min, nowHour) {
+    if (h === 0 || h > 12) return { h: h, m: min };
+    var asAM = (h === 12) ? 0  : h;
+    var asPM = (h === 12) ? 12 : h + 12;
+    if (nowHour >= asPM) return { h: asAM, m: min }; // past PM  → next is AM
+    if (nowHour >= asAM) return { h: asPM, m: min }; // past AM  → next is PM
+    return ((asPM - nowHour) <= (asAM - nowHour))    // both future → nearer
+        ? { h: asPM, m: min } : { h: asAM, m: min };
+}
+
+// "a.m." / "a. m." / "am" → "am";  "p.m." → "pm"
+function _normAP(s) { return s.replace(/[\s.]/g, ''); }
+
+// Detect AM/PM intent from qualifier words in the text (e.g. "du matin", "abends").
+// Returns 'am', 'pm', or null.
+function _inlineAP(t) {
+    if (t.indexOf('du matin')  >= 0 || t.indexOf('am morgen')  >= 0 ||
+        t.indexOf('de manana') >= 0 || t.indexOf('de ma\xf1ana') >= 0 ||
+        /\b(matin|morgens|morning|ma\xf1ana|manana|madrugada)\b/.test(t))
+        return 'am';
+    if (t.indexOf('du soir')       >= 0 || t.indexOf('de la tarde')  >= 0 ||
+        t.indexOf('de la noche')   >= 0 || t.indexOf('am abend')     >= 0 ||
+        /\b(soir|abend|abends|evening|noche|tarde|nachmittag)\b/.test(t))
+        return 'pm';
+    return null;
+}
+
+// Apply AM/PM to an ambiguous hour h: use inline qualifier first, then clock context.
+function _withAP(h, min, t, nowHour) {
+    if (h >= 13) return { h: h, m: min };
+    var ap = _inlineAP(t);
+    if (ap === 'am') return { h: (h === 12 ? 0  : h),     m: min };
+    if (ap === 'pm') return { h: (h <  12 ? h + 12 : h),  m: min };
+    return disambiguate(h, min, nowHour);
+}
+
+function extractTime(text, nowHour) {
     var t = text.toLowerCase();
-    if (t.indexOf('noon') >= 0) return { h: 12, m: 0 };
-    if (t.indexOf('midnight') >= 0) return { h: 0, m: 0 };
-    var m = t.match(/\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)/);
-    if (!m) m = t.match(/(\d{1,2})(?::(\d{2}))?\s*o'?clock/);
-    if (!m) return null;
-    var h = parseInt(m[1], 10);
-    var min = m[2] ? parseInt(m[2], 10) : 0;
-    var ampm = m[3];
-    if (ampm === 'pm' && h < 12) h += 12;
-    if (ampm === 'am' && h === 12) h = 0;
-    return { h: h, m: min };
+    // nowHour 0-23: callers pass new Date().getHours(); tests pass a fixed value.
+    if (nowHour === undefined) nowHour = new Date().getHours();
+
+    // Plain-substring helper — avoids regex word-boundary issues with accented chars.
+    function has() {
+        for (var i = 0; i < arguments.length; i++)
+            if (t.indexOf(arguments[i]) >= 0) return true;
+        return false;
+    }
+
+    // ── Numeric patterns first ──────────────────────────────────────────────
+    // Checked before named expressions so "6 heures du matin" → 06:00, not 09:00.
+
+    // AM/PM explicit — digits; handles am/pm/a.m./p.m./a. m. with any spacing
+    var m = t.match(/\b(\d{1,2})(?::(\d{2}))?\s*([ap]\.?\s?m\.?)(?!\w)/);
+    if (m) {
+        var h = parseInt(m[1], 10), min = m[2] ? parseInt(m[2], 10) : 0;
+        var ap = _normAP(m[3]);
+        if (ap === 'pm' && h < 12) h += 12;
+        if (ap === 'am' && h === 12) h = 0;
+        return { h: h, m: min };
+    }
+
+    // AM/PM — number words: "six pm", "six a.m."
+    m = t.match(new RegExp('\\b(' + _NUM_PAT + ')\\s+([ap]\\.?\\s?m\\.?)(?!\\w)'));
+    if (m) {
+        var h = _NUM_WORDS[m[1]], ap = _normAP(m[2]);
+        if (ap === 'pm' && h < 12) h += 12;
+        if (ap === 'am' && h === 12) h = 0;
+        return { h: h, m: 0 };
+    }
+
+    // French/Spanish compact: "16h", "6h30", "6h 30"
+    // (digit immediately before 'h' — "6 heures" is caught by the next pattern)
+    m = t.match(/\b(\d{1,2})h\s?(\d{2})?\b/);
+    if (m) return _withAP(parseInt(m[1], 10), m[2] ? parseInt(m[2], 10) : 0, t, nowHour);
+
+    // French long form:  "6 heures [30]", "16 heures"
+    // German:            "6 Uhr [30]",    "16 Uhr"
+    m = t.match(/\b(\d{1,2})\s+(?:heures?|uhr)\b(?:\s+(\d{1,2}))?\b/);
+    if (m) return _withAP(parseInt(m[1], 10), m[2] ? parseInt(m[2], 10) : 0, t, nowHour);
+
+    // Same but with number words: "six heures", "six uhr"
+    m = t.match(new RegExp('\\b(' + _NUM_PAT + ')\\s+(?:heures?|uhr)\\b'));
+    if (m) return _withAP(_NUM_WORDS[m[1]], 0, t, nowHour);
+
+    // Spanish: "las 6", "las 6 y media" (+30), "las 6 y cuarto" (+15)
+    m = t.match(/\blas\s+(\d{1,2})\b/);
+    if (m) {
+        var extra = t.indexOf('y media') >= 0 ? 30 : t.indexOf('y cuarto') >= 0 ? 15 : 0;
+        return _withAP(parseInt(m[1], 10), extra, t, nowHour);
+    }
+    m = t.match(new RegExp('\\blas\\s+(' + _NUM_PAT + ')\\b'));
+    if (m) {
+        var extra = t.indexOf('y media') >= 0 ? 30 : t.indexOf('y cuarto') >= 0 ? 15 : 0;
+        return _withAP(_NUM_WORDS[m[1]], extra, t, nowHour);
+    }
+
+    // 24-hour HH:MM — unambiguous when hour ≥ 13 or leading zero present ("09:30")
+    m = t.match(/\b([01]?\d|2[0-3]):([0-5]\d)\b/);
+    if (m) {
+        var h24 = parseInt(m[1], 10), m24 = parseInt(m[2], 10);
+        if (h24 >= 13 || m[1].length === 2) return { h: h24, m: m24 };
+        return disambiguate(h24, m24, nowHour);
+    }
+
+    // o'clock — digits, then number words
+    m = t.match(/\b(\d{1,2})\s*o'?clock\b/);
+    if (m) return disambiguate(parseInt(m[1], 10), 0, nowHour);
+    m = t.match(new RegExp('\\b(' + _NUM_PAT + ")\\s*o'?clock\\b"));
+    if (m) return disambiguate(_NUM_WORDS[m[1]], 0, nowHour);
+
+    // Bare "at <n>" — context-disambiguated
+    m = t.match(/\bat\s+(\d{1,2})\b(?!\s*[:\d])/);
+    if (m) return disambiguate(parseInt(m[1], 10), 0, nowHour);
+    m = t.match(new RegExp('\\bat\\s+(' + _NUM_PAT + ')\\b'));
+    if (m) return disambiguate(_NUM_WORDS[m[1]], 0, nowHour);
+
+    // ── Named time expressions (fallback when no numeric time found) ─────────
+    // ORDERING: more-specific phrases before any shorter phrase they contain:
+    //   "afternoon" ⊃ "noon",  "nachmittag" ⊃ "mittag",  "après-midi" ⊃ "midi"
+    //   "esta noche temprano" ⊃ "esta noche"
+
+    // Breakfast (~08:00)
+    if (has('at breakfast', 'for breakfast',
+            'beim fr\xfchst\xfcck', 'zum fr\xfchst\xfcck', 'beim fruhstuck', 'zum fruhstuck',
+            'au petit-d\xe9jeuner', 'au petit dejeuner',
+            'en el desayuno', 'para el desayuno'))
+        return { h: 8, m: 0 };
+
+    // Morning (~09:00)
+    if (has('this morning', 'in the morning', 'early morning',
+            'heute morgen', 'am morgen', 'morgens', 'fr\xfchmorgens', 'fruhmorgens',
+            'ce matin', 'le matin', 'du matin',
+            'esta ma\xf1ana', 'esta manana', 'por la ma\xf1ana', 'por la manana'))
+        return { h: 9, m: 0 };
+
+    // Afternoon (~14:00) — before noon
+    if (has('this afternoon', 'in the afternoon',
+            'heute nachmittag', 'am nachmittag', 'nachmittags',
+            'cet apr\xe8s-midi', 'cet apres-midi', "l'apr\xe8s-midi", "l'apres-midi",
+            'esta tarde', 'por la tarde', 'de tarde'))
+        return { h: 14, m: 0 };
+
+    // Evening (~18:00) — before tonight
+    if (has('this evening', 'in the evening',
+            'heute abend', 'am abend', 'abends',
+            'ce soir', 'le soir', 'du soir',
+            'esta noche temprano'))
+        return { h: 18, m: 0 };
+
+    // Noon / lunch (~12:00)
+    if (has('noon', 'lunchtime', 'at lunch',
+            'mittag', 'mittagessen', 'zu mittag', 'zum mittagessen',
+            'midi', 'au d\xe9jeuner', 'au dejeuner',
+            'mediod\xeda', 'mediodia', 'al mediod\xeda', 'al mediodia', 'almuerzo'))
+        return { h: 12, m: 0 };
+
+    // Midnight (~00:00)
+    if (has('midnight', 'mitternacht', 'minuit', 'medianoche'))
+        return { h: 0, m: 0 };
+
+    // Tonight / at night (~20:00)
+    if (has('tonight', 'at night',
+            'heute nacht', 'in der nacht', 'nachts',
+            'cette nuit', 'la nuit',
+            'esta noche', 'por la noche', 'de noche'))
+        return { h: 20, m: 0 };
+
+    // Dinner (~19:00)
+    if (has('at dinner', 'at dinnertime', 'for dinner',
+            'beim abendessen', 'zum abendessen',
+            'au d\xeener', 'au diner',
+            'en la cena', 'para cenar', 'a cenar'))
+        return { h: 19, m: 0 };
+
+    return null;
 }
 
 function extractDueDate(text) {
@@ -387,10 +653,53 @@ function sendToWebhook(text, cfg, cb) {
 }
 
 // ============================================================================
+// TODOIST
+// ============================================================================
+
+function guessPriority(text) {
+    var t = text.toLowerCase();
+    if (/\b(urgent|urgently|asap|immediately|critical|emergency|right now|right away|top priority)\b/.test(t))
+        return 4; // urgent (red)
+    if (/\b(important|high priority|must|crucial|vital|definitely|priority)\b/.test(t))
+        return 3; // high (orange)
+    if (/\b(soon|medium priority|when possible|should)\b/.test(t))
+        return 2; // medium (blue)
+    return 1;     // normal
+}
+
+function sendToTodoist(text, cfg, cb) {
+    var token = cfg.todoist_token;
+    if (!token) { cb(false, 'Todoist not authenticated'); return; }
+
+    var body = { content: text };
+    if (cfg.todoist_project_id) body.project_id = cfg.todoist_project_id;
+    // Pass the raw text as due_string — Todoist's parser extracts date/time natively
+    body.due_string = text;
+    var priority = guessPriority(text);
+    if (priority > 1) body.priority = priority;
+
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', 'https://api.todoist.com/rest/v2/tasks');
+    xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.onload = function() {
+        if (this.status >= 200 && this.status < 300) {
+            cb(true, 'todoist');
+        } else if (this.status === 401) {
+            cb(false, 'Todoist: invalid token');
+        } else {
+            cb(false, 'Todoist error ' + this.status);
+        }
+    };
+    xhr.onerror = function() { cb(false, 'Network error'); };
+    xhr.send(JSON.stringify(body));
+}
+
+// ============================================================================
 // ROUTER
 // ============================================================================
 
-var DEST_INDEX = { tasks: 0, notion: 1, ai: 2, webhook: 3, local: 4 };
+var DEST_INDEX = { tasks: 0, notion: 1, ai: 2, webhook: 3, local: 4, todoist: 5 };
 
 function routeAndSend(text, isFollowup) {
     var cfg     = getConfig();
@@ -414,9 +723,11 @@ function routeAndSend(text, isFollowup) {
     // classifyIntent may return cfg.default_dest when no signal — honour 'local'
     if (!dest) dest = defaultDest;
 
-    // Task/reminder signals must never go to AI — redirect to tasks (if enabled) or local
+    // Task/reminder signals must never go to AI — redirect to a task service or local
     if (dest === 'ai' && !isFollowup && isTaskLike(text)) {
-        dest = enabled.indexOf('tasks') >= 0 ? 'tasks' : 'local';
+        if      (enabled.indexOf('tasks')   >= 0) dest = 'tasks';
+        else if (enabled.indexOf('todoist') >= 0) dest = 'todoist';
+        else dest = 'local';
     }
 
     var di = DEST_INDEX[dest] !== undefined ? DEST_INDEX[dest] : 4;
@@ -425,7 +736,7 @@ function routeAndSend(text, isFollowup) {
     // Tell the watch which destination was chosen so it can show the right status
     sendToWatch({ ROUTING_DONE: di });
 
-    var DEST_LABEL = { tasks: 'Tasks', notion: 'Notion', ai: 'AI', webhook: 'Webhook', local: 'Local' };
+    var DEST_LABEL = { tasks: 'Tasks', notion: 'Notion', ai: 'AI', webhook: 'Webhook', local: 'Local', todoist: 'Todoist' };
 
     function onResult(ok, data) {
         if (!ok) {
@@ -448,6 +759,7 @@ function routeAndSend(text, isFollowup) {
         case 'notion':  sendToNotion (text, cfg, onResult); break;
         case 'ai':      sendToAI     (text, isFollowup, cfg, onResult); break;
         case 'webhook': sendToWebhook(text, cfg, onResult); break;
+        case 'todoist': sendToTodoist(text, cfg, onResult); break;
         case 'local':   onResult(true, 'local'); break;  // save on-watch, no network call
         default:        sendToWatch({ CONFIRM: 2 });
     }
@@ -473,6 +785,7 @@ Pebble.addEventListener('ready', function() {
     if (enabled.indexOf('notion')  >= 0) mask |= 2;
     if (enabled.indexOf('ai')      >= 0) mask |= 4;
     if (enabled.indexOf('webhook') >= 0) mask |= 8;
+    if (enabled.indexOf('todoist') >= 0) mask |= 32;
     sendToWatch({ DEST_MASK: mask });
 });
 
@@ -485,7 +798,21 @@ Pebble.addEventListener('appmessage', function(e) {
 
     if (p.NOTE_TEXT !== undefined) {
         s_last_note = p.NOTE_TEXT;
-        routeAndSend(p.NOTE_TEXT, p.NOTE_IS_FOLLOWUP === 1);
+        if (p.NOTE_IS_CLASSIFY_ONLY) {
+            // Classify only — tell watch the predicted destination without routing
+            var cfg2 = getConfig();
+            var enabled2 = getEnabledDests(cfg2);
+            var dest2 = (enabled2.length === 0) ? 'local'
+                      : classifyIntent(p.NOTE_TEXT, enabled2, cfg2) || cfg2.default_dest || enabled2[0];
+            if (dest2 === 'ai' && isTaskLike(p.NOTE_TEXT)) {
+                if      (enabled2.indexOf('tasks')   >= 0) dest2 = 'tasks';
+                else if (enabled2.indexOf('todoist') >= 0) dest2 = 'todoist';
+                else dest2 = 'local';
+            }
+            sendToWatch({ ROUTING_DONE: DEST_INDEX[dest2] !== undefined ? DEST_INDEX[dest2] : 4 });
+        } else {
+            routeAndSend(p.NOTE_TEXT, p.NOTE_IS_FOLLOWUP === 1);
+        }
     }
 
     if (p.CLEAR_CONTEXT) {
@@ -561,6 +888,7 @@ Pebble.addEventListener('showConfiguration', function() {
     '<select id="default_dest">' +
     '<option value="local"   ' + sel(cfg.default_dest || 'local','local')   + '>Local Reminders (on-watch)</option>' +
     '<option value="tasks"   ' + sel(cfg.default_dest,'tasks')   + '>Google Tasks</option>' +
+    '<option value="todoist" ' + sel(cfg.default_dest,'todoist') + '>Todoist</option>' +
     '<option value="notion"  ' + sel(cfg.default_dest,'notion')  + '>Notion</option>' +
     '<option value="ai"      ' + sel(cfg.default_dest,'ai')      + '>AI Agent</option>' +
     '<option value="webhook" ' + sel(cfg.default_dest,'webhook') + '>Webhook</option>' +
@@ -585,11 +913,11 @@ Pebble.addEventListener('showConfiguration', function() {
         '3. Your browser redirects to a page that fails to load — that\'s expected.<br>' +
         '4. Copy the full URL from the address bar (starts with <code>http://localhost/</code>).<br>' +
         '5. Come back here, paste it below, and tap <b>Connect</b>.</p>' +
-        'Step 1 — Google sign-in URL:<input type="text" id="tasks_auth_url" readonly value="' + pUrl + '" ' +
+        'Google sign-in URL:<input type="text" id="tasks_auth_url" readonly value="' + pUrl + '" ' +
         'style="font-size:10px;color:#aaa;background:#111;border-color:#555">' +
         '<button type="button" id="tasks_copy_btn" onclick="copyAuthUrl()" ' +
         'style="width:auto;padding:6px 14px;font-size:13px;margin:4px 0 12px">Copy URL</button>' +
-        '<br>Step 5 — Paste redirect URL:<input type="text" id="tasks_redirect_url" placeholder="http://localhost/?code=...">' +
+        '<br>Paste redirect URL:<input type="text" id="tasks_redirect_url" placeholder="http://localhost/?code=...">' +
         '<button type="button" id="tasks_exchange_btn" onclick="exchangeCode()" ' +
         'style="width:auto;padding:6px 14px;font-size:13px;margin:4px 0 10px">Connect</button>' +
         '</div>') +
@@ -597,6 +925,21 @@ Pebble.addEventListener('showConfiguration', function() {
     '<input type="hidden" id="tasks_refresh_token" value=\'' + esc(cfg.tasks_refresh_token) + '\'>' +
     '<input type="hidden" id="pkce_verifier" value=\'' + esc(pVer) + '\'>' +
     '<br>Task list:<select id="tasks_list_id"><option value="">Loading...</option></select>' +
+    '<br>Routing keywords (comma-separated, added to defaults):<input type="text" id="tasks_keywords"' +
+    ' value=\'' + esc(cfg.tasks_keywords) + '\' placeholder="buy milk, dentist, ...">' +
+    '</div></div>' +
+
+    // ---- Todoist ----
+    '<div class="section">' +
+    '<label class="toggle-label"><input type="checkbox" id="todoist_enabled" ' + chk(cfg.todoist_enabled) + '>' +
+    ' Todoist</label>' +
+    '<div class="fields">' +
+    'API key:<input type="password" id="todoist_token" value=\'' + esc(cfg.todoist_token) + '\'' +
+    ' onblur="fetchTodoistProjects(this.value)">' +
+    '<p class="note">Get your API key at <a href="https://app.todoist.com/app/settings/integrations/developer" target="_blank">app.todoist.com → Settings → Integrations → Developer</a></p>' +
+    '<br>Project:<select id="todoist_project_id"><option value="">Inbox (default)</option></select>' +
+    '<br>Routing keywords (comma-separated, added to defaults):<input type="text" id="todoist_keywords"' +
+    ' value=\'' + esc(cfg.todoist_keywords) + '\' placeholder="todoist, add to todoist, ...">' +
     '</div></div>' +
 
     // ---- Notion ----
@@ -606,6 +949,8 @@ Pebble.addEventListener('showConfiguration', function() {
     '<div class="fields">' +
     'Integration token:<input type="password" id="notion_token" value=\'' + esc(cfg.notion_token) + '\'>' +
     'Database ID:<input type="text" id="notion_db_id" value=\'' + esc(cfg.notion_db_id) + '\'>' +
+    'Routing keywords (comma-separated, added to defaults):<input type="text" id="notion_keywords"' +
+    ' value=\'' + esc(cfg.notion_keywords) + '\' placeholder="idea, log, draft, ...">' +
     '</div></div>' +
 
     // ---- AI Agent ----
@@ -630,6 +975,8 @@ Pebble.addEventListener('showConfiguration', function() {
     '(no credit card required)</p>' +
     'Additional instructions (appended to default prompt):<input type="text" id="ai_system"' +
     ' value=\'' + esc(cfg.ai_system) + '\' placeholder="e.g. Always respond in French.">' +
+    'Routing keywords (comma-separated, added to defaults):<input type="text" id="ai_keywords"' +
+    ' value=\'' + esc(cfg.ai_keywords) + '\' placeholder="explain, summarize, ...">' +
     '</div></div>' +
 
     // ---- Webhook ----
@@ -689,10 +1036,33 @@ Pebble.addEventListener('showConfiguration', function() {
       'xhr.onerror=function(){sel.innerHTML=\'<option value="">Default list</option>\';};' +
       'xhr.send();' +
     '}' +
+    'function fetchTodoistProjects(token){' +
+      'if(!token)return;' +
+      'var sel=document.getElementById("todoist_project_id");' +
+      'sel.innerHTML=\'<option value="">Loading...</option>\';' +
+      'var xhr=new XMLHttpRequest();' +
+      'xhr.open("GET","https://api.todoist.com/rest/v2/projects");' +
+      'xhr.setRequestHeader("Authorization","Bearer "+token);' +
+      'xhr.onload=function(){' +
+        'try{' +
+          'var r=JSON.parse(this.responseText);' +
+          'if(!Array.isArray(r)){sel.innerHTML=\'<option value="">Inbox (default)</option>\';return;}' +
+          'var saved="' + esc(cfg.todoist_project_id) + '";' +
+          'sel.innerHTML=\'<option value="">Inbox (default)</option>\'+' +
+          'r.map(function(p){' +
+            'return\'<option value="\'+p.id+\'"\'+(String(p.id)===saved?\' selected\':\'\')+\'>\'+p.name+\'</option>\';' +
+          '}).join("");' +
+        '}catch(e){sel.innerHTML=\'<option value="">Inbox (default)</option>\';}' +
+      '};' +
+      'xhr.onerror=function(){sel.innerHTML=\'<option value="">Inbox (default)</option>\';};' +
+      'xhr.send();' +
+    '}' +
     'window.addEventListener("load",function(){' +
       'var tok=document.getElementById("tasks_access_token").value;' +
       'if(tok)fetchTaskLists(tok);' +
       'else document.getElementById("tasks_list_id").innerHTML=\'<option value="">Default list</option>\';' +
+      'var tdTok=document.getElementById("todoist_token").value;' +
+      'if(tdTok)fetchTodoistProjects(tdTok);' +
     '});' +
     'function copyAuthUrl(){' +
       'var el=document.getElementById("tasks_auth_url");' +
@@ -757,15 +1127,22 @@ Pebble.addEventListener('showConfiguration', function() {
     'tasks_access_token:document.getElementById("tasks_access_token").value,' +
     'tasks_refresh_token:document.getElementById("tasks_refresh_token").value,' +
     'tasks_list_id:document.getElementById("tasks_list_id").value.trim(),' +
+    'tasks_keywords:document.getElementById("tasks_keywords").value.trim(),' +
+    'todoist_enabled:document.getElementById("todoist_enabled").checked,' +
+    'todoist_token:document.getElementById("todoist_token").value.trim(),' +
+    'todoist_project_id:document.getElementById("todoist_project_id").value,' +
+    'todoist_keywords:document.getElementById("todoist_keywords").value.trim(),' +
     'notion_enabled:document.getElementById("notion_enabled").checked,' +
     'notion_token:document.getElementById("notion_token").value.trim(),' +
     'notion_db_id:document.getElementById("notion_db_id").value.trim(),' +
+    'notion_keywords:document.getElementById("notion_keywords").value.trim(),' +
     'ai_enabled:document.getElementById("ai_enabled").checked,' +
     'ai_preset:document.getElementById("ai_preset").value,' +
     'ai_url:document.getElementById("ai_url").value.trim(),' +
     'ai_model:document.getElementById("ai_model").value.trim(),' +
     'ai_key:document.getElementById("ai_key").value.trim(),' +
     'ai_system:document.getElementById("ai_system").value.trim(),' +
+    'ai_keywords:document.getElementById("ai_keywords").value.trim(),' +
     'webhook_enabled:document.getElementById("webhook_enabled").checked,' +
     'webhook_url:document.getElementById("webhook_url").value.trim(),' +
     'webhook_verb:document.getElementById("webhook_verb").value,' +
