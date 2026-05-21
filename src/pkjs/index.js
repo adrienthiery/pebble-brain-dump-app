@@ -516,21 +516,35 @@ function sendToTasks(text, cfg, cb) {
 // NOTION
 // ============================================================================
 
+function extractNotionPageId(urlOrId) {
+    if (!urlOrId) return '';
+    urlOrId = urlOrId.trim();
+    // UUID format (with dashes): xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    var m = urlOrId.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+    if (m) return m[1];
+    // Plain 32-char hex (Notion URL suffix)
+    m = urlOrId.match(/([0-9a-f]{32})(?:[^0-9a-f]|$)/i);
+    if (m) return m[1];
+    return urlOrId; // already an ID or unknown — pass through
+}
+
 function sendToNotion(text, cfg, cb) {
-    var token = cfg.notion_token;
-    var dbId  = cfg.notion_db_id;
-    if (!token || !dbId) { cb(false, 'Notion not configured'); return; }
+    var token  = cfg.notion_token;
+    var pageId = extractNotionPageId(cfg.notion_page_id);
+    if (!token || !pageId) { cb(false, 'Notion not configured'); return; }
 
     var body = {
-        parent: { database_id: dbId },
-        properties: {
-            title: { title: [{ type: 'text',
-                               text: { content: text.substring(0, 200) } }] }
-        }
+        children: [{
+            object: 'block',
+            type: 'paragraph',
+            paragraph: {
+                rich_text: [{ type: 'text', text: { content: text.substring(0, 2000) } }]
+            }
+        }]
     };
 
     var xhr = new XMLHttpRequest();
-    xhr.open('POST', 'https://api.notion.com/v1/pages');
+    xhr.open('PATCH', 'https://api.notion.com/v1/blocks/' + pageId + '/children');
     xhr.setRequestHeader('Authorization', 'Bearer ' + token);
     xhr.setRequestHeader('Content-Type', 'application/json');
     xhr.setRequestHeader('Notion-Version', '2022-06-28');
@@ -959,9 +973,10 @@ Pebble.addEventListener('showConfiguration', function() {
     '<label class="toggle-label"><input type="checkbox" id="notion_enabled" ' + chk(cfg.notion_enabled) + '>' +
     ' Notion</label>' +
     '<div class="fields">' +
-    'Integration token:<input type="password" id="notion_token" value=\'' + esc(cfg.notion_token) + '\'>' +
-    'Database ID:<input type="text" id="notion_db_id" value=\'' + esc(cfg.notion_db_id) + '\'>' +
-    'Routing keywords (comma-separated, added to defaults):<input type="text" id="notion_keywords"' +
+    'API token:<input type="password" id="notion_token" value=\'' + esc(cfg.notion_token) + '\'>' +
+    '<p class="note">Generate a token at <a href="https://www.notion.so/developers/tokens" target="_blank">notion.so/developers/tokens</a></p>' +
+    'Target page URL or ID:<input type="text" id="notion_page_id" value=\'' + esc(cfg.notion_page_id) + '\' placeholder="https://notion.so/My-Page-abc123... or page ID">' +
+    '<br>Routing keywords (comma-separated, added to defaults):<input type="text" id="notion_keywords"' +
     ' value=\'' + esc(cfg.notion_keywords) + '\' placeholder="idea, log, draft, ...">' +
     '</div></div>' +
 
@@ -1146,7 +1161,7 @@ Pebble.addEventListener('showConfiguration', function() {
     'todoist_keywords:document.getElementById("todoist_keywords").value.trim(),' +
     'notion_enabled:document.getElementById("notion_enabled").checked,' +
     'notion_token:document.getElementById("notion_token").value.trim(),' +
-    'notion_db_id:document.getElementById("notion_db_id").value.trim(),' +
+    'notion_page_id:document.getElementById("notion_page_id").value,' +
     'notion_keywords:document.getElementById("notion_keywords").value.trim(),' +
     'ai_enabled:document.getElementById("ai_enabled").checked,' +
     'ai_preset:document.getElementById("ai_preset").value,' +
