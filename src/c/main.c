@@ -830,12 +830,13 @@ static void home_window_load(Window *window) {
     int content_w = b.size.w - HOME_BANNER_W - HOME_BANNER_INSET_X;
     if (content_w < 20) content_w = b.size.w;
     int status_y = b.size.h / 2 + 36;
-    s_status_layer = text_layer_create(GRect(4, status_y, content_w - 8, 20));
+    s_status_layer = text_layer_create(GRect(4, status_y, content_w - 8, 42));
     text_layer_set_background_color(s_status_layer, GColorClear);
     text_layer_set_text_color(s_status_layer, C_STATUS);
     text_layer_set_font(s_status_layer,
                         fonts_get_system_font(FONT_KEY_GOTHIC_14));
     text_layer_set_text_alignment(s_status_layer, GTextAlignmentCenter);
+    text_layer_set_overflow_mode(s_status_layer, GTextOverflowModeWordWrap);
     text_layer_set_text(s_status_layer, "Ready");
     layer_add_child(root, text_layer_get_layer(s_status_layer));
 

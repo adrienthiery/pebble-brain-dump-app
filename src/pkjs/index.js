@@ -170,7 +170,7 @@ function classifyIntent(text, enabled, cfg) {
         TASK_SIGNALS.forEach(function(p) { if (t.indexOf(p) >= 0) scores['todoist'] += 2; });
         tw.forEach(function(w) { if (t.indexOf(w) >= 0) scores['todoist'] += 1; });
         // Todoist-specific keywords
-        ['todoist', 'add to todoist', 'in todoist'].forEach(function(k) {
+        ['todoist', 'add to todoist', 'in todoist', 'to-do', 'todo', 'to do'].forEach(function(k) {
             if (t.indexOf(k) >= 0) scores['todoist'] += 4;
         });
         getCustomKeywords(cfg, 'todoist').forEach(function(k) {
@@ -673,22 +673,34 @@ function sendToTodoist(text, cfg, cb) {
 
     var body = { content: text };
     if (cfg.todoist_project_id) body.project_id = cfg.todoist_project_id;
-    // Pass the raw text as due_string — Todoist's parser extracts date/time natively
-    body.due_string = text;
+
+    // Extract due date/time using our own parser and build a proper ISO datetime
+    var dueDate = extractDueDate(text);
+    if (dueDate) {
+        var dueTime = extractTime(text);
+        if (dueTime) {
+            function pad(n) { return n < 10 ? '0' + n : '' + n; }
+            body.due_datetime = dueDate.substring(0, 10) + 'T' +
+                                pad(dueTime.h) + ':' + pad(dueTime.m) + ':00';
+        } else {
+            body.due_date = dueDate.substring(0, 10);
+        }
+    }
+
     var priority = guessPriority(text);
     if (priority > 1) body.priority = priority;
 
     var xhr = new XMLHttpRequest();
-    xhr.open('POST', 'https://api.todoist.com/rest/v2/tasks');
+    xhr.open('POST', 'https://api.todoist.com/api/v1/tasks');
     xhr.setRequestHeader('Authorization', 'Bearer ' + token);
     xhr.setRequestHeader('Content-Type', 'application/json');
     xhr.onload = function() {
         if (this.status >= 200 && this.status < 300) {
             cb(true, 'todoist');
         } else if (this.status === 401) {
-            cb(false, 'Todoist: invalid token');
+            cb(false, 'Invalid API key');
         } else {
-            cb(false, 'Todoist error ' + this.status);
+            cb(false, 'Error ' + this.status);
         }
     };
     xhr.onerror = function() { cb(false, 'Network error'); };
@@ -1041,7 +1053,7 @@ Pebble.addEventListener('showConfiguration', function() {
       'var sel=document.getElementById("todoist_project_id");' +
       'sel.innerHTML=\'<option value="">Loading...</option>\';' +
       'var xhr=new XMLHttpRequest();' +
-      'xhr.open("GET","https://api.todoist.com/rest/v2/projects");' +
+      'xhr.open("GET","https://api.todoist.com/api/v1/projects");' +
       'xhr.setRequestHeader("Authorization","Bearer "+token);' +
       'xhr.onload=function(){' +
         'try{' +
