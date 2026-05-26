@@ -58,7 +58,8 @@ function getEnabledDests(cfg) {
     if (cfg.todoist_enabled) d.push('todoist');
     if (cfg.notion_enabled)  d.push('notion');
     if (cfg.ai_enabled)      d.push('ai');
-    if (cfg.webhook_enabled) d.push('webhook');
+    if (cfg.webhook_enabled)   d.push('webhook');
+    if (cfg.nextcloud_enabled) d.push('nextcloud');
     return d;
 }
 
@@ -178,22 +179,34 @@ function classifyIntent(text, enabled, cfg) {
         });
     }
 
+    // Shared note-taking signals (used by both Notion and Nextcloud)
+    var noteSignals = [
+        'note','write down','save this','document','jot',
+        'record that','add to my notes','log this','idea','memo','keep in mind',
+        'notiz','aufschreiben','speichern','idee','festhalten',
+        'noter','sauvegarder','id\xe9e','conserver',
+        'nota','anotar','guardar','apuntar'
+    ];
+
     // Notion signals
     if (scores['notion'] !== undefined) {
-        var np = [
-            // English
-            'note','write down','save this','document','jot',
-            'record that','add to my notes','log this','idea','memo','keep in mind',
-            // German
-            'notiz','aufschreiben','speichern','idee','festhalten',
-            // French
-            'note','noter','sauvegarder','id\xe9e','conserver',
-            // Spanish
-            'nota','anotar','guardar','idea','apuntar'
-        ];
-        np.forEach(function(p) { if (t.indexOf(p) >= 0) scores['notion'] += 2; });
+        noteSignals.forEach(function(p) { if (t.indexOf(p) >= 0) scores['notion'] += 2; });
+        ['notion', 'add to notion', 'save to notion'].forEach(function(k) {
+            if (t.indexOf(k) >= 0) scores['notion'] += 4;
+        });
         getCustomKeywords(cfg, 'notion').forEach(function(k) {
             if (t.indexOf(k) >= 0) scores['notion'] += 2;
+        });
+    }
+
+    // Nextcloud signals
+    if (scores['nextcloud'] !== undefined) {
+        noteSignals.forEach(function(p) { if (t.indexOf(p) >= 0) scores['nextcloud'] += 2; });
+        ['nextcloud', 'add to nextcloud', 'save to nextcloud'].forEach(function(k) {
+            if (t.indexOf(k) >= 0) scores['nextcloud'] += 4;
+        });
+        getCustomKeywords(cfg, 'nextcloud').forEach(function(k) {
+            if (t.indexOf(k) >= 0) scores['nextcloud'] += 2;
         });
     }
 
@@ -472,10 +485,10 @@ function sendToTasks(text, cfg, cb) {
     var listId = cfg.tasks_list_id || '@default';
     if (!token) { cb(false, 'Google not authenticated'); return; }
 
-    var task = { title: text };
-    var due = extractDueDate(text);
-    if (due) task.due = due;
+    var due  = extractDueDate(text);
     var time = extractTime(text);
+    var task = { title: due ? stripDateTimeFromText(text) : text };
+    if (due) task.due = due;
     if (time) {
         function pad(n) { return n < 10 ? '0' + n : '' + n; }
         task.notes = 'Due at ' + pad(time.h) + ':' + pad(time.m);
@@ -685,11 +698,11 @@ function sendToTodoist(text, cfg, cb) {
     var token = cfg.todoist_token;
     if (!token) { cb(false, 'Todoist not authenticated'); return; }
 
-    var body = { content: text };
+    var dueDate = extractDueDate(text);
+    var body = { content: dueDate ? stripDateTimeFromText(text) : text };
     if (cfg.todoist_project_id) body.project_id = cfg.todoist_project_id;
 
-    // Extract due date/time using our own parser and build a proper ISO datetime
-    var dueDate = extractDueDate(text);
+    // Build ISO due date/time
     if (dueDate) {
         var dueTime = extractTime(text);
         if (dueTime) {
@@ -722,10 +735,191 @@ function sendToTodoist(text, cfg, cb) {
 }
 
 // ============================================================================
+// NEXTCLOUD NOTES
+// ============================================================================
+
+function btoa64(str) {
+    var c = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
+    var r = '';
+    for (var i = 0; i < str.length; i += 3) {
+        var b0 = str.charCodeAt(i);
+        var b1 = i + 1 < str.length ? str.charCodeAt(i + 1) : 0;
+        var b2 = i + 2 < str.length ? str.charCodeAt(i + 2) : 0;
+        r += c[b0 >> 2];
+        r += c[((b0 & 3) << 4) | (b1 >> 4)];
+        r += i + 1 < str.length ? c[((b1 & 15) << 2) | (b2 >> 6)] : '=';
+        r += i + 2 < str.length ? c[b2 & 63] : '=';
+    }
+    return r;
+}
+
+function sendToNextcloud(text, cfg, cb) {
+    var instance = (cfg.nextcloud_url || '').replace(/\/$/, '');
+    var user     = cfg.nextcloud_user;
+    var pass     = cfg.nextcloud_pass;
+    if (!instance || !user || !pass) { cb(false, 'Nextcloud not configured'); return; }
+
+    var body = {
+        title:    text.substring(0, 80),
+        content:  text,
+        category: cfg.nextcloud_category || ''
+    };
+
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', instance + '/index.php/apps/notes/api/v1/notes');
+    xhr.setRequestHeader('Authorization', 'Basic ' + btoa64(user + ':' + pass));
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.setRequestHeader('OCS-APIREQUEST', 'true');
+    xhr.onload = function() {
+        if (this.status >= 200 && this.status < 300) {
+            cb(true, 'nextcloud');
+        } else if (this.status === 401) {
+            cb(false, 'Invalid credentials');
+        } else {
+            cb(false, 'Error ' + this.status);
+        }
+    };
+    xhr.onerror = function() { cb(false, 'Network error'); };
+    xhr.send(JSON.stringify(body));
+}
+
+// ============================================================================
+// TEXT CLEANING
+// ============================================================================
+
+// Strip common command prefix/suffix preambles before sending note to destination.
+// EN/DE/FR/ES patterns. Falls back to original if result is trivially short.
+function cleanNoteText(text) {
+    var t = text.trim();
+    var original = t;
+
+    // ── Prefix (first match wins) ──────────────────────────────────────────
+    var prefixRe = [
+        // EN — politeness header
+        /^(?:can\s+you\s+)?please\s+(?=\S)/i,
+        // EN — reminder / task verbs
+        /^(?:please\s+)?remind\s+(?:me\s+)?(?:to\s+|that\s+|about\s+)?/i,
+        /^(?:don'?t|do\s+not)\s+forget\s+(?:to\s+|that\s+|about\s+)?/i,
+        /^remember\s+(?:to\s+|that\s+)?/i,
+        /^i\s+(?:need|have|must|should|want)\s+to\s+/i,
+        /^(?:add|put|write\s+down)\s+/i,
+        // EN — note/idea labels
+        /^(?:quick\s+)?note(?:\s+to\s+(?:my)?self)?[: ]\s*/i,
+        /^ideas?[: ]\s*/i,
+        /^memo[: ]\s*/i,
+        /^task[: ]\s*/i,
+        /^(?:add|save|send|log)(?:\s+(?:this|it))?(?:\s+to|\s+in)\s+(?:notion|todoist|nextcloud|google\s+tasks?|my\s+(?:notes?|list|tasks?)|(?:my\s+)?to-?do\s+list)[: ,]\s*/i,
+        /^ask(?:\s+the)?\s+(?:ai|claude|gpt|assistant)[: ]\s*/i,
+        // DE
+        /^(?:kannst\s+du\s+mich\s+)?erinn?er(?:e)?\s+mich(?:\s+daran)?\s*(?:,\s*)?(?:zu\s+)?/i,
+        /^vergiss?\s+(?:es\s+)?nicht\s*(?:,\s*)?(?:zu\s+)?/i,
+        /^denk(?:e)?\s+daran\s*(?:,\s*)?(?:zu\s+)?/i,
+        /^ich\s+(?:muss|soll|brauche|will|m\xf6chte|mochte)\s+/i,
+        /^notiz(?:\s+f\xfcr\s+mich)?[: ]\s*/i,
+        /^idee[: ]\s*/i,
+        /^aufgabe[: ]\s*/i,
+        /^(?:f\xfcg\s+hinzu|hinzuf\xfcgen|speichern?)\s*(?:in|zu)?\s*(?:notion|todoist|nextcloud)?[: ]\s*/i,
+        // FR
+        /^rappelle[- ](?:moi\s+(?:de\s+|d')?)?\s*/i,
+        /^n'?oublie\s+pas\s+(?:de\s+|d')?\s*/i,
+        /^pense(?:z)?\s+\xe0\s+/i,
+        /^je\s+(?:dois|veux|devrais|voudrais)\s+/i,
+        /^il\s+faut\s+(?:que\s+je\s+)?/i,
+        /^note(?:\s+(?:pour\s+moi|\xe0\s+moi[-\s]m\xeame))?[: ]\s*/i,
+        /^id\xe9e[: ]\s*/i,
+        /^m\xe9mo[: ]\s*/i,
+        /^t\xe2che[: ]\s*/i,
+        /^(?:ajouter?|sauvegarder?|envoyer?)(?:\s+(?:\xe0|dans))?\s+(?:notion|todoist|nextcloud)[: ]\s*/i,
+        // ES
+        /^rec?u\xe9rd?a(?:me\s+(?:de\s+|que\s+)?)?\s*/i,
+        /^no\s+(?:te\s+)?olvides\s+(?:de\s+)?\s*/i,
+        /^acu\xe9rdate\s+(?:de\s+)?\s*/i,
+        /^(?:necesito|tengo\s+que|debo|hay\s+que)\s+/i,
+        /^nota(?:\s+para\s+m\xed)?[: ]\s*/i,
+        /^tarea[: ]\s*/i,
+        /^(?:agregar?|a\xf1adir?|guardar?|enviar?)(?:\s+(?:a|en))?\s+(?:notion|todoist|nextcloud)[: ]\s*/i,
+    ];
+    for (var i = 0; i < prefixRe.length; i++) {
+        var m = t.match(prefixRe[i]);
+        if (m) { t = t.slice(m[0].length).trim(); break; }
+    }
+
+    // ── Suffix (first match wins) ──────────────────────────────────────────
+    var suffixRe = [
+        // EN
+        /[,.]?\s+(?:to|in|on)\s+(?:my\s+)?(?:todo|to-?do|shopping|task|reminder|grocery|groceries)\s+list\.?$/i,
+        /[,.]?\s+(?:to|in)\s+(?:todoist|notion|nextcloud|google\s+tasks?|my\s+notes?|tasks?)\.?$/i,
+        /[,.]?\s+(?:to|on)\s+my\s+list\.?$/i,
+        // DE
+        /[,.]?\s+(?:zu|in|auf)\s+(?:mein(?:er|e)?\s+)?(?:todo|aufgaben?|einkaufs?|erinnerungs?)(?:\s*-?\s*liste?)?\.?$/i,
+        /[,.]?\s+(?:in|zu)\s+(?:todoist|notion|nextcloud)\.?$/i,
+        // FR
+        /[,.]?\s+(?:\xe0|dans)\s+(?:ma\s+)?(?:liste\s+(?:de\s+)?(?:t\xe2ches?|courses?|rappels?))?\.?$/i,
+        /[,.]?\s+(?:dans|\xe0)\s+(?:todoist|notion|nextcloud|ma\s+liste)\.?$/i,
+        // ES
+        /[,.]?\s+(?:a|en)\s+(?:mi\s+)?(?:lista\s+(?:de\s+)?(?:tareas?|compras?|pendientes?))?\.?$/i,
+        /[,.]?\s+(?:en|a)\s+(?:todoist|notion|nextcloud|mi\s+lista)\.?$/i,
+    ];
+    for (var j = 0; j < suffixRe.length; j++) {
+        var s = t.replace(suffixRe[j], '');
+        if (s !== t) { t = s.trim(); break; }
+    }
+
+    // ── Capitalize + validate ──────────────────────────────────────────────
+    if (t.length > 0) t = t.charAt(0).toUpperCase() + t.slice(1);
+    var trivial = /^(this|it|that|these|those|eso|esto|ello|[çc]a|cela|ceci|das|es|dies(?:es?)?)\.?$/i;
+    if (t.length < 3 || trivial.test(t)) return original;
+    return t;
+}
+
+// Strip trailing date/time expressions from task titles (content captured in due field).
+// Only used for task-manager destinations (Google Tasks, Todoist) — notes keep full text.
+function stripDateTimeFromText(text) {
+    var original = text.trim();
+
+    function stripTrailing(s) {
+        return s
+            // Trailing time — AM/PM and 24h
+            .replace(/[,.]?\s+at\s+\d{1,2}(?::\d{2})?\s*[ap]\.?\s?m\.?$/i, '')
+            .replace(/[,.]?\s+\d{1,2}(?::\d{2})?\s*[ap]\.?\s?m\.?$/i, '')
+            .replace(/[,.]?\s+at\s+(?:[01]?\d|2[0-3]):[0-5]\d$/i, '')
+            .replace(/[,.]?\s+\d{1,2}h\s?\d{0,2}$/i, '')
+            .replace(/[,.]?\s+\d{1,2}\s+(?:heures?|uhr)(?:\s+\d{1,2})?$/i, '')
+            // Trailing named time
+            .replace(/[,.]?\s+at\s+(?:noon|midnight|lunchtime)$/i, '')
+            .replace(/[,.]?\s+(?:in\s+the\s+)?(?:this\s+)?(?:morning|afternoon|evening)$/i, '')
+            .replace(/[,.]?\s+(?:at\s+)?(?:tonight|midnight|noon|lunchtime)$/i, '')
+            .replace(/[,.]?\s+(?:at\s+)?(?:dinner|breakfast|lunch)(?:time)?$/i, '')
+            .replace(/[,.]?\s+(?:heute\s+(?:morgen|abend|nacht|nachmittag)|morgens|abends)$/i, '')
+            .replace(/[,.]?\s+(?:ce\s+matin|cet?\s+apr[eè]s-midi|ce\s+soir)$/i, '')
+            .replace(/[,.]?\s+(?:esta\s+(?:ma[nñ]ana|tarde|noche)|por\s+la\s+(?:ma[nñ]ana|tarde|noche))$/i, '')
+            // Trailing date
+            .replace(/[,.]?\s+(?:by\s+|on\s+|for\s+)?tomorrow$/i, '')
+            .replace(/[,.]?\s+today$/i, '')
+            .replace(/[,.]?\s+(?:on\s+)?(?:next\s+|this\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)$/i, '')
+            .replace(/[,.]?\s+next\s+(?:week|month)$/i, '')
+            .replace(/[,.]?\s+by\s+(?:end\s+of\s+)?(?:today|tomorrow|this\s+week|this\s+month)$/i, '')
+            .replace(/[,.]?\s+(?:morgen|[üu]bermorgen)$/i, '')
+            .replace(/[,.]?\s+(?:am\s+)?(?:montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonntag)$/i, '')
+            .replace(/[,.]?\s+n[äa]chste[rn]?\s+(?:woche|monat|montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonntag)$/i, '')
+            .replace(/[,.]?\s+demain$/i, '')
+            .replace(/[,.]?\s+(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)$/i, '')
+            .replace(/[,.]?\s+la\s+semaine\s+prochaine$/i, '')
+            .replace(/[,.]?\s+ma[nñ]ana$/i, '')
+            .replace(/[,.]?\s+(?:lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo)$/i, '')
+            .trim();
+    }
+
+    // Two passes: handles "at 15:00 on Friday" → strip "on Friday" → strip "at 15:00"
+    var t = stripTrailing(stripTrailing(original));
+    return (t.length >= 3) ? t : original;
+}
+
+// ============================================================================
 // ROUTER
 // ============================================================================
 
-var DEST_INDEX = { tasks: 0, notion: 1, ai: 2, webhook: 3, local: 4, todoist: 5 };
+var DEST_INDEX = { tasks: 0, notion: 1, ai: 2, webhook: 3, local: 4, todoist: 5, nextcloud: 6 };
 
 function routeAndSend(text, isFollowup) {
     var cfg     = getConfig();
@@ -762,7 +956,11 @@ function routeAndSend(text, isFollowup) {
     // Tell the watch which destination was chosen so it can show the right status
     sendToWatch({ ROUTING_DONE: di });
 
-    var DEST_LABEL = { tasks: 'Tasks', notion: 'Notion', ai: 'AI', webhook: 'Webhook', local: 'Local', todoist: 'Todoist' };
+    // Clean command preambles from the text before sending to the destination.
+    // Original text is still used for routing, due-date extraction, and AI context.
+    var sendText = cleanNoteText(text);
+
+    var DEST_LABEL = { tasks: 'Tasks', notion: 'Notion', ai: 'AI', webhook: 'Webhook', local: 'Local', todoist: 'Todoist', nextcloud: 'Nextcloud' };
 
     function onResult(ok, data) {
         if (!ok) {
@@ -772,7 +970,7 @@ function routeAndSend(text, isFollowup) {
             sendToWatch({ CONFIRM: 2, ERROR_MSG: msg });
             return;
         }
-        addHistory(text, di);
+        addHistory(sendText, di);
         if (dest === 'ai') {
             sendToWatch({ AI_RESPONSE: data, AI_RESPONSE_DONE: 1, DEST_USED: di });
         } else {
@@ -781,13 +979,14 @@ function routeAndSend(text, isFollowup) {
     }
 
     switch (dest) {
-        case 'tasks':   sendToTasks  (text, cfg, onResult); break;
-        case 'notion':  sendToNotion (text, cfg, onResult); break;
-        case 'ai':      sendToAI     (text, isFollowup, cfg, onResult); break;
-        case 'webhook': sendToWebhook(text, cfg, onResult); break;
-        case 'todoist': sendToTodoist(text, cfg, onResult); break;
-        case 'local':   onResult(true, 'local'); break;  // save on-watch, no network call
-        default:        sendToWatch({ CONFIRM: 2 });
+        case 'tasks':     sendToTasks     (sendText, cfg, onResult); break;
+        case 'notion':    sendToNotion    (sendText, cfg, onResult); break;
+        case 'ai':        sendToAI        (sendText, isFollowup, cfg, onResult); break;
+        case 'webhook':   sendToWebhook   (sendText, cfg, onResult); break;
+        case 'todoist':   sendToTodoist   (sendText, cfg, onResult); break;
+        case 'nextcloud': sendToNextcloud (sendText, cfg, onResult); break;
+        case 'local':     onResult(true, 'local'); break;  // saved on-watch from s_note_buf
+        default:          sendToWatch({ CONFIRM: 2 });
     }
 }
 
@@ -811,7 +1010,8 @@ Pebble.addEventListener('ready', function() {
     if (enabled.indexOf('notion')  >= 0) mask |= 2;
     if (enabled.indexOf('ai')      >= 0) mask |= 4;
     if (enabled.indexOf('webhook') >= 0) mask |= 8;
-    if (enabled.indexOf('todoist') >= 0) mask |= 32;
+    if (enabled.indexOf('todoist')   >= 0) mask |= 32;
+    if (enabled.indexOf('nextcloud') >= 0) mask |= 64;
     sendToWatch({ DEST_MASK: mask });
 });
 
@@ -917,7 +1117,8 @@ Pebble.addEventListener('showConfiguration', function() {
     '<option value="todoist" ' + sel(cfg.default_dest,'todoist') + '>Todoist</option>' +
     '<option value="notion"  ' + sel(cfg.default_dest,'notion')  + '>Notion</option>' +
     '<option value="ai"      ' + sel(cfg.default_dest,'ai')      + '>AI Agent</option>' +
-    '<option value="webhook" ' + sel(cfg.default_dest,'webhook') + '>Webhook</option>' +
+    '<option value="nextcloud" ' + sel(cfg.default_dest,'nextcloud') + '>Nextcloud Notes</option>' +
+    '<option value="webhook"   ' + sel(cfg.default_dest,'webhook')   + '>Webhook</option>' +
     '</select></label>' +
     '</div>' +
 
@@ -978,6 +1179,20 @@ Pebble.addEventListener('showConfiguration', function() {
     'Target page URL or ID:<input type="text" id="notion_page_id" value=\'' + esc(cfg.notion_page_id) + '\' placeholder="https://notion.so/My-Page-abc123... or page ID">' +
     '<br>Routing keywords (comma-separated, added to defaults):<input type="text" id="notion_keywords"' +
     ' value=\'' + esc(cfg.notion_keywords) + '\' placeholder="idea, log, draft, ...">' +
+    '</div></div>' +
+
+    // ---- Nextcloud Notes ----
+    '<div class="section">' +
+    '<label class="toggle-label"><input type="checkbox" id="nextcloud_enabled" ' + chk(cfg.nextcloud_enabled) + '>' +
+    ' Nextcloud Notes</label>' +
+    '<div class="fields">' +
+    'Instance URL:<input type="text" id="nextcloud_url" value=\'' + esc(cfg.nextcloud_url) + '\' placeholder="https://cloud.example.com">' +
+    'Username:<input type="text" id="nextcloud_user" value=\'' + esc(cfg.nextcloud_user) + '\'>' +
+    'App password:<input type="password" id="nextcloud_pass" value=\'' + esc(cfg.nextcloud_pass) + '\'>' +
+    '<p class="note">Generate an App Password in Nextcloud: Settings → Security → App passwords</p>' +
+    'Category (optional):<input type="text" id="nextcloud_category" value=\'' + esc(cfg.nextcloud_category) + '\' placeholder="Brain Dump">' +
+    'Routing keywords (comma-separated, added to defaults):<input type="text" id="nextcloud_keywords"' +
+    ' value=\'' + esc(cfg.nextcloud_keywords) + '\' placeholder="nextcloud, cloud note, ...">' +
     '</div></div>' +
 
     // ---- AI Agent ----
@@ -1163,6 +1378,12 @@ Pebble.addEventListener('showConfiguration', function() {
     'notion_token:document.getElementById("notion_token").value.trim(),' +
     'notion_page_id:document.getElementById("notion_page_id").value,' +
     'notion_keywords:document.getElementById("notion_keywords").value.trim(),' +
+    'nextcloud_enabled:document.getElementById("nextcloud_enabled").checked,' +
+    'nextcloud_url:document.getElementById("nextcloud_url").value.trim(),' +
+    'nextcloud_user:document.getElementById("nextcloud_user").value.trim(),' +
+    'nextcloud_pass:document.getElementById("nextcloud_pass").value.trim(),' +
+    'nextcloud_category:document.getElementById("nextcloud_category").value.trim(),' +
+    'nextcloud_keywords:document.getElementById("nextcloud_keywords").value.trim(),' +
     'ai_enabled:document.getElementById("ai_enabled").checked,' +
     'ai_preset:document.getElementById("ai_preset").value,' +
     'ai_url:document.getElementById("ai_url").value.trim(),' +

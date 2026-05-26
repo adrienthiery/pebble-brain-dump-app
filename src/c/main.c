@@ -29,14 +29,16 @@
 #define DEST_AI      2
 #define DEST_WEBHOOK 3
 #define DEST_LOCAL   4   // on-watch reminders list (no phone needed)
-#define DEST_TODOIST 5
+#define DEST_TODOIST    5
+#define DEST_NEXTCLOUD  6
 
 // Destination bitmask bits (must match pkjs DEST_MASK)
-#define DEST_BIT_TASKS   (1 << DEST_TASKS)
-#define DEST_BIT_NOTION  (1 << DEST_NOTION)
-#define DEST_BIT_AI      (1 << DEST_AI)
-#define DEST_BIT_WEBHOOK (1 << DEST_WEBHOOK)
-#define DEST_BIT_TODOIST (1 << DEST_TODOIST)
+#define DEST_BIT_TASKS     (1 << DEST_TASKS)
+#define DEST_BIT_NOTION    (1 << DEST_NOTION)
+#define DEST_BIT_AI        (1 << DEST_AI)
+#define DEST_BIT_WEBHOOK   (1 << DEST_WEBHOOK)
+#define DEST_BIT_TODOIST   (1 << DEST_TODOIST)
+#define DEST_BIT_NEXTCLOUD (1 << DEST_NEXTCLOUD)
 
 // Color aliases — compile away on B&W platforms
 #ifdef PBL_COLOR
@@ -196,7 +198,8 @@ static const char *dest_short_name(int dest) {
         case DEST_AI:      return "AI";
         case DEST_WEBHOOK: return "Hook";
         case DEST_LOCAL:   return "Local";
-        case DEST_TODOIST: return "Todoist";
+        case DEST_TODOIST:   return "Todoist";
+        case DEST_NEXTCLOUD: return "Cloud";
         default:           return "?";
     }
 }
