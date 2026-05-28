@@ -1093,6 +1093,7 @@ Pebble.addEventListener('showConfiguration', function() {
     'button{width:100%;padding:12px;background:#f90;color:#000;border:none;' +
     'border-radius:4px;font-size:16px;font-weight:bold;margin-top:16px;cursor:pointer}' +
     '.note{font-size:11px;color:#666;margin:4px 0}' +
+    '.fetch-error{font-size:11px;color:#f66;margin:6px 0 0;display:none}' +
     'a{color:#f90}' +
     '.save-bar{position:fixed;bottom:0;left:0;width:100%;padding:12px 16px;background:#111;box-sizing:border-box;z-index:100}' +
     '</style></head><body>' +
@@ -1152,6 +1153,9 @@ Pebble.addEventListener('showConfiguration', function() {
     '<input type="hidden" id="tasks_refresh_token" value=\'' + esc(cfg.tasks_refresh_token) + '\'>' +
     '<input type="hidden" id="pkce_verifier" value=\'' + esc(pVer) + '\'>' +
     '<br>Task list:<select id="tasks_list_id"><option value="">Loading...</option></select>' +
+    '<button type="button" onclick="fetchTaskLists(document.getElementById(\'tasks_access_token\').value)"' +
+    ' style="width:auto;padding:4px 10px;font-size:12px;margin:4px 0 8px">&#8635; Refresh</button>' +
+    '<div id="tasks_fetch_error" class="fetch-error"></div>' +
     '<br>Routing keywords (comma-separated, added to defaults):<input type="text" id="tasks_keywords"' +
     ' value=\'' + esc(cfg.tasks_keywords) + '\' placeholder="buy milk, dentist, ...">' +
     '</div></div>' +
@@ -1165,6 +1169,9 @@ Pebble.addEventListener('showConfiguration', function() {
     ' onblur="fetchTodoistProjects(this.value)">' +
     '<p class="note">Get your API key at <a href="https://app.todoist.com/app/settings/integrations/developer" target="_blank">app.todoist.com → Settings → Integrations → Developer</a></p>' +
     '<br>Project:<select id="todoist_project_id"><option value="">Inbox (default)</option></select>' +
+    '<button type="button" onclick="fetchTodoistProjects(document.getElementById(\'todoist_token\').value)"' +
+    ' style="width:auto;padding:4px 10px;font-size:12px;margin:4px 0 8px">&#8635; Refresh</button>' +
+    '<div id="todoist_fetch_error" class="fetch-error"></div>' +
     '<br>Routing keywords (comma-separated, added to defaults):<input type="text" id="todoist_keywords"' +
     ' value=\'' + esc(cfg.todoist_keywords) + '\' placeholder="todoist, add to todoist, ...">' +
     '</div></div>' +
@@ -1260,12 +1267,23 @@ Pebble.addEventListener('showConfiguration', function() {
     // and stored in a hidden input; no in-page JS needed to generate it.
     'var G_CID="122599459809-1egpb0mrc97lpeh6fshnfv1i1drnvnkd.apps.googleusercontent.com";' +
     'var G_SECRET="' + TASKS_CLIENT_SECRET + '";' +
+    'function setFetchError(id,msg){' +
+      'var el=document.getElementById(id);' +
+      'if(!el)return;' +
+      'el.textContent=msg;' +
+      'el.style.display=msg?"block":"none";' +
+    '}' +
     'function fetchTaskLists(token){' +
+      'if(!token)return;' +
       'var sel=document.getElementById("tasks_list_id");' +
+      'sel.innerHTML=\'<option value="">Loading...</option>\';' +
+      'setFetchError("tasks_fetch_error","");' +
       'var xhr=new XMLHttpRequest();' +
       'xhr.open("GET","https://tasks.googleapis.com/tasks/v1/users/@me/lists?maxResults=100");' +
       'xhr.setRequestHeader("Authorization","Bearer "+token);' +
       'xhr.onload=function(){' +
+        'if(this.status===401){sel.innerHTML=\'<option value="">Default list</option>\';setFetchError("tasks_fetch_error","Auth error — reconnect Google Tasks");return;}' +
+        'if(this.status<200||this.status>=300){sel.innerHTML=\'<option value="">Default list</option>\';setFetchError("tasks_fetch_error","Error "+this.status+" fetching task lists");return;}' +
         'try{' +
           'var r=JSON.parse(this.responseText);' +
           'if(!r.items){sel.innerHTML=\'<option value="">Default list</option>\';return;}' +
@@ -1273,31 +1291,44 @@ Pebble.addEventListener('showConfiguration', function() {
           'sel.innerHTML=r.items.map(function(l){' +
             'return\'<option value="\'+l.id+\'"\'+(l.id===saved?\' selected\':\'\')+\'>\'+l.title+\'</option>\';' +
           '}).join("");' +
-        '}catch(e){sel.innerHTML=\'<option value="">Default list</option>\';}' +
+        '}catch(e){sel.innerHTML=\'<option value="">Default list</option>\';setFetchError("tasks_fetch_error","Could not parse response");}' +
       '};' +
-      'xhr.onerror=function(){sel.innerHTML=\'<option value="">Default list</option>\';};' +
+      'xhr.onerror=function(){sel.innerHTML=\'<option value="">Default list</option>\';setFetchError("tasks_fetch_error","Network error — check connection");};' +
       'xhr.send();' +
     '}' +
     'function fetchTodoistProjects(token){' +
       'if(!token)return;' +
       'var sel=document.getElementById("todoist_project_id");' +
       'sel.innerHTML=\'<option value="">Loading...</option>\';' +
-      'var xhr=new XMLHttpRequest();' +
-      'xhr.open("GET","https://api.todoist.com/api/v1/projects");' +
-      'xhr.setRequestHeader("Authorization","Bearer "+token);' +
-      'xhr.onload=function(){' +
-        'try{' +
-          'var r=JSON.parse(this.responseText);' +
-          'if(!Array.isArray(r)){sel.innerHTML=\'<option value="">Inbox (default)</option>\';return;}' +
-          'var saved="' + esc(cfg.todoist_project_id) + '";' +
-          'sel.innerHTML=\'<option value="">Inbox (default)</option>\'+' +
-          'r.map(function(p){' +
-            'return\'<option value="\'+p.id+\'"\'+(String(p.id)===saved?\' selected\':\'\')+\'>\'+p.name+\'</option>\';' +
-          '}).join("");' +
-        '}catch(e){sel.innerHTML=\'<option value="">Inbox (default)</option>\';}' +
-      '};' +
-      'xhr.onerror=function(){sel.innerHTML=\'<option value="">Inbox (default)</option>\';};' +
-      'xhr.send();' +
+      'setFetchError("todoist_fetch_error","");' +
+      'var allProjects=[];' +
+      'function fetchPage(cursor){' +
+        'var url="https://api.todoist.com/api/v1/projects?limit=200";' +
+        'if(cursor)url+="&cursor="+encodeURIComponent(cursor);' +
+        'var xhr=new XMLHttpRequest();' +
+        'xhr.open("GET",url);' +
+        'xhr.setRequestHeader("Authorization","Bearer "+token);' +
+        'xhr.onload=function(){' +
+          'if(this.status===401){sel.innerHTML=\'<option value="">Inbox (default)</option>\';setFetchError("todoist_fetch_error","Invalid API key");return;}' +
+          'if(this.status<200||this.status>=300){sel.innerHTML=\'<option value="">Inbox (default)</option>\';setFetchError("todoist_fetch_error","Error "+this.status+" fetching projects");return;}' +
+          'try{' +
+            'var r=JSON.parse(this.responseText);' +
+            // API v1 returns { results: [...], next_cursor: "..." } — also handle plain array for safety
+            'var page=Array.isArray(r)?r:(r.results||r.items||[]);' +
+            'allProjects=allProjects.concat(page);' +
+            'if(!Array.isArray(r)&&r.next_cursor){fetchPage(r.next_cursor);return;}' +
+            'if(!allProjects.length){sel.innerHTML=\'<option value="">Inbox (default)</option>\';return;}' +
+            'var saved="' + esc(cfg.todoist_project_id) + '";' +
+            'sel.innerHTML=\'<option value="">Inbox (default)</option>\'+' +
+            'allProjects.map(function(p){' +
+              'return\'<option value="\'+p.id+\'"\'+(String(p.id)===saved?\' selected\':\'\')+\'>\'+p.name+\'</option>\';' +
+            '}).join("");' +
+          '}catch(e){sel.innerHTML=\'<option value="">Inbox (default)</option>\';setFetchError("todoist_fetch_error","Could not parse response");}' +
+        '};' +
+        'xhr.onerror=function(){sel.innerHTML=\'<option value="">Inbox (default)</option>\';setFetchError("todoist_fetch_error","Network error — check connection");};' +
+        'xhr.send();' +
+      '}' +
+      'fetchPage(null);' +
     '}' +
     'window.addEventListener("load",function(){' +
       'var tok=document.getElementById("tasks_access_token").value;' +
