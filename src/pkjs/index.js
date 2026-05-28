@@ -462,16 +462,23 @@ function extractDueDate(text) {
     return d ? d.toISOString().split('T')[0] + 'T00:00:00.000Z' : null;
 }
 
+// cb(newToken, invalidGrant)
+// newToken: string on success, null on failure
+// invalidGrant: true when Google says the refresh token is revoked/expired → user must reconnect
 function refreshGoogleToken(cfg, cb) {
-    if (!cfg.tasks_refresh_token) { cb(null); return; }
+    if (!cfg.tasks_refresh_token) { cb(null, false); return; }
     var xhr = new XMLHttpRequest();
     xhr.open('POST', 'https://oauth2.googleapis.com/token');
     xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
     xhr.onload = function() {
-        try { var r = JSON.parse(this.responseText); cb(r.access_token || null); }
-        catch(e) { cb(null); }
+        try {
+            var r = JSON.parse(this.responseText);
+            if (r.access_token) { cb(r.access_token, false); }
+            else { cb(null, r.error === 'invalid_grant'); }
+        }
+        catch(e) { cb(null, false); }
     };
-    xhr.onerror = function() { cb(null); };
+    xhr.onerror = function() { cb(null, false); };
     xhr.send(
         'grant_type=refresh_token' +
         '&refresh_token=' + encodeURIComponent(cfg.tasks_refresh_token) +
@@ -505,13 +512,15 @@ function sendToTasks(text, cfg, cb) {
                 cb(true, 'tasks');
             } else if (this.status === 401) {
                 // Token expired — try refresh
-                refreshGoogleToken(cfg, function(newToken) {
+                refreshGoogleToken(cfg, function(newToken, invalidGrant) {
                     if (newToken) {
                         cfg.tasks_access_token = newToken;
                         saveConfig(cfg);
                         doPost(newToken);
                     } else {
-                        cb(false, 'Auth expired');
+                        cb(false, invalidGrant
+                            ? 'Token revoked — reconnect in settings'
+                            : 'Auth error — try again');
                     }
                 });
             } else {
@@ -1006,13 +1015,27 @@ Pebble.addEventListener('ready', function() {
     var cfg     = getConfig();
     var enabled = getEnabledDests(cfg);
     var mask = 0;
-    if (enabled.indexOf('tasks')   >= 0) mask |= 1;
-    if (enabled.indexOf('notion')  >= 0) mask |= 2;
-    if (enabled.indexOf('ai')      >= 0) mask |= 4;
-    if (enabled.indexOf('webhook') >= 0) mask |= 8;
+    if (enabled.indexOf('tasks')     >= 0) mask |= 1;
+    if (enabled.indexOf('notion')    >= 0) mask |= 2;
+    if (enabled.indexOf('ai')        >= 0) mask |= 4;
+    if (enabled.indexOf('webhook')   >= 0) mask |= 8;
     if (enabled.indexOf('todoist')   >= 0) mask |= 32;
     if (enabled.indexOf('nextcloud') >= 0) mask |= 64;
     sendToWatch({ DEST_MASK: mask });
+
+    // Proactively refresh Google access token so it's always fresh before use.
+    // Access tokens expire after 1 hour; refreshing on every connect keeps them valid.
+    if (cfg.tasks_enabled && cfg.tasks_refresh_token) {
+        refreshGoogleToken(cfg, function(newToken, invalidGrant) {
+            if (newToken) {
+                cfg.tasks_access_token = newToken;
+                saveConfig(cfg);
+                console.log('Google token refreshed on ready');
+            } else if (invalidGrant) {
+                console.log('Google refresh token revoked — user must reconnect');
+            }
+        });
+    }
 });
 
 Pebble.addEventListener('appmessage', function(e) {
