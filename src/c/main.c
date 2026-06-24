@@ -612,17 +612,17 @@ static void confirm_window_load(Window *window) {
     int content_w = b.size.w - CONFIRM_HINT_W - 4;
 
     // Header "Your note"
-    s_confirm_header_layer = text_layer_create(GRect(4, 2, content_w, 18));
+    s_confirm_header_layer = text_layer_create(GRect(4, 2, content_w, 24));
     text_layer_set_background_color(s_confirm_header_layer, GColorClear);
     text_layer_set_text_color(s_confirm_header_layer, C_ACCENT);
     text_layer_set_font(s_confirm_header_layer,
-                        fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
+                        fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
     text_layer_set_text(s_confirm_header_layer, "Your note");
     layer_add_child(root, text_layer_get_layer(s_confirm_header_layer));
 
     // Transcription text (word-wrap)
     s_confirm_content_layer = text_layer_create(
-        GRect(4, 22, content_w, b.size.h - 52));
+        GRect(4, 28, content_w, b.size.h - 58));
     text_layer_set_background_color(s_confirm_content_layer, GColorClear);
     text_layer_set_text_color(s_confirm_content_layer, GColorWhite);
     text_layer_set_font(s_confirm_content_layer,
@@ -638,27 +638,27 @@ static void confirm_window_load(Window *window) {
     text_layer_set_background_color(s_confirm_target_layer, GColorClear);
     text_layer_set_text_color(s_confirm_target_layer, C_STATUS);
     text_layer_set_font(s_confirm_target_layer,
-                        fonts_get_system_font(FONT_KEY_GOTHIC_14));
+                        fonts_get_system_font(FONT_KEY_GOTHIC_18));
     text_layer_set_text(s_confirm_target_layer, s_confirm_target_buf);
     layer_add_child(root, text_layer_get_layer(s_confirm_target_layer));
 
     // Right-side button hints
     s_confirm_hint_redo_layer = text_layer_create(
-        GRect(hint_x, b.size.h * 18 / 100, hint_w, 16));
+        GRect(hint_x, b.size.h * 18 / 100, hint_w, 22));
     text_layer_set_background_color(s_confirm_hint_redo_layer, GColorClear);
     text_layer_set_text_color(s_confirm_hint_redo_layer, C_HINT);
     text_layer_set_font(s_confirm_hint_redo_layer,
-                        fonts_get_system_font(FONT_KEY_GOTHIC_14));
+                        fonts_get_system_font(FONT_KEY_GOTHIC_18));
     text_layer_set_text_alignment(s_confirm_hint_redo_layer, GTextAlignmentCenter);
     text_layer_set_text(s_confirm_hint_redo_layer, "Redo");
     layer_add_child(root, text_layer_get_layer(s_confirm_hint_redo_layer));
 
     s_confirm_hint_send_layer = text_layer_create(
-        GRect(hint_x, b.size.h * 47 / 100, hint_w, 16));
+        GRect(hint_x, b.size.h * 47 / 100, hint_w, 22));
     text_layer_set_background_color(s_confirm_hint_send_layer, GColorClear);
     text_layer_set_text_color(s_confirm_hint_send_layer, C_ACCENT);
     text_layer_set_font(s_confirm_hint_send_layer,
-                        fonts_get_system_font(FONT_KEY_GOTHIC_14));
+                        fonts_get_system_font(FONT_KEY_GOTHIC_18));
     text_layer_set_text_alignment(s_confirm_hint_send_layer, GTextAlignmentCenter);
     text_layer_set_text(s_confirm_hint_send_layer, "Send");
     layer_add_child(root, text_layer_get_layer(s_confirm_hint_send_layer));
@@ -837,7 +837,7 @@ static void home_window_load(Window *window) {
     text_layer_set_background_color(s_status_layer, GColorClear);
     text_layer_set_text_color(s_status_layer, C_STATUS);
     text_layer_set_font(s_status_layer,
-                        fonts_get_system_font(FONT_KEY_GOTHIC_14));
+                        fonts_get_system_font(FONT_KEY_GOTHIC_18));
     text_layer_set_text_alignment(s_status_layer, GTextAlignmentCenter);
     text_layer_set_overflow_mode(s_status_layer, GTextOverflowModeWordWrap);
     text_layer_set_text(s_status_layer, "Ready");
@@ -847,8 +847,8 @@ static void home_window_load(Window *window) {
     // Round: labels positioned inside the crescent (big-circle inner edge + small margin).
     // Rect:  labels inside the flat right banner.
     #define HINT_H      16
-    #define HINT_UP_H   42
-    #define HINT_DOWN_H 28
+    #define HINT_UP_H   48
+    #define HINT_DOWN_H 48
 #ifdef PBL_ROUND
     // SELECT is at the widest part of the crescent (equator).
     // UP/DOWN are where the crescent narrows — shift them left to stay centred.
@@ -867,15 +867,15 @@ static void home_window_load(Window *window) {
     s_hint_up_layer = text_layer_create(GRect(HINT_X_EDGE, btn_up_y - 12, HINT_W, HINT_UP_H));
     text_layer_set_background_color(s_hint_up_layer, GColorClear);
     text_layer_set_text_color(s_hint_up_layer, GColorBlack);
-    text_layer_set_font(s_hint_up_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+    text_layer_set_font(s_hint_up_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
     text_layer_set_text_alignment(s_hint_up_layer, GTextAlignmentCenter);
-    text_layer_set_text(s_hint_up_layer, "Past\nsmart\nactions");
+    text_layer_set_text(s_hint_up_layer, "Past\nactions");
     layer_add_child(root, text_layer_get_layer(s_hint_up_layer));
 
-    s_hint_select_layer = text_layer_create(GRect(HINT_X, btn_select_y, HINT_W, HINT_H));
+    s_hint_select_layer = text_layer_create(GRect(HINT_X, btn_select_y, HINT_W, 22));
     text_layer_set_background_color(s_hint_select_layer, GColorClear);
     text_layer_set_text_color(s_hint_select_layer, GColorRed);
-    text_layer_set_font(s_hint_select_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+    text_layer_set_font(s_hint_select_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
     text_layer_set_text_alignment(s_hint_select_layer, GTextAlignmentCenter);
     text_layer_set_text(s_hint_select_layer, "Dump");
     layer_add_child(root, text_layer_get_layer(s_hint_select_layer));
@@ -883,7 +883,7 @@ static void home_window_load(Window *window) {
     s_hint_down_layer = text_layer_create(GRect(HINT_X_EDGE, btn_down_y - 6, HINT_W, HINT_DOWN_H));
     text_layer_set_background_color(s_hint_down_layer, GColorClear);
     text_layer_set_text_color(s_hint_down_layer, GColorBlack);
-    text_layer_set_font(s_hint_down_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+    text_layer_set_font(s_hint_down_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
     text_layer_set_text_alignment(s_hint_down_layer, GTextAlignmentCenter);
     text_layer_set_text(s_hint_down_layer, "Local\nnotes");
     layer_add_child(root, text_layer_get_layer(s_hint_down_layer));
@@ -960,17 +960,17 @@ static void response_window_load(Window *window) {
     text_layer_set_background_color(s_resp_header_layer, GColorClear);
     text_layer_set_text_color(s_resp_header_layer, C_HEADER);
     text_layer_set_font(s_resp_header_layer,
-                        fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
+                        fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
     text_layer_set_overflow_mode(s_resp_header_layer, GTextOverflowModeTrailingEllipsis);
     text_layer_set_text(s_resp_header_layer, s_note_buf);
     layer_add_child(root, text_layer_get_layer(s_resp_header_layer));
 
     // SELECT button label — right side, proportional Y for all models
-    s_resp_hint_layer = text_layer_create(GRect(b.size.w - 52, b.size.h * 47 / 100, 50, 16));
+    s_resp_hint_layer = text_layer_create(GRect(b.size.w - 52, b.size.h * 47 / 100, 50, 20));
     text_layer_set_background_color(s_resp_hint_layer, GColorClear);
     text_layer_set_text_color(s_resp_hint_layer, C_ACCENT);
     text_layer_set_font(s_resp_hint_layer,
-                        fonts_get_system_font(FONT_KEY_GOTHIC_14));
+                        fonts_get_system_font(FONT_KEY_GOTHIC_18));
     text_layer_set_text_alignment(s_resp_hint_layer, GTextAlignmentRight);
     text_layer_set_text(s_resp_hint_layer, "Reply");
     layer_add_child(root, text_layer_get_layer(s_resp_hint_layer));
@@ -989,7 +989,7 @@ static void response_window_load(Window *window) {
     text_layer_set_background_color(s_resp_content_layer, GColorClear);
     text_layer_set_text_color(s_resp_content_layer, GColorWhite);
     text_layer_set_font(s_resp_content_layer,
-                        fonts_get_system_font(FONT_KEY_GOTHIC_18));
+                        fonts_get_system_font(FONT_KEY_GOTHIC_24));
     text_layer_set_overflow_mode(s_resp_content_layer, GTextOverflowModeWordWrap);
     text_layer_set_text(s_resp_content_layer, s_conversation_buf);
     scroll_layer_add_child(s_resp_scroll_layer,
@@ -1050,17 +1050,17 @@ static void detail_window_load(Window *window) {
     strncpy(s_detail_header_buf, s_history_short[s_detail_idx], sizeof(s_detail_header_buf) - 1);
     s_detail_header_buf[sizeof(s_detail_header_buf) - 1] = '\0';
 
-    s_detail_header_layer = text_layer_create(GRect(4, 2, b.size.w - 8, 20));
+    s_detail_header_layer = text_layer_create(GRect(4, 2, b.size.w - 8, 24));
     text_layer_set_background_color(s_detail_header_layer, GColorClear);
     text_layer_set_text_color(s_detail_header_layer, C_HEADER);
     text_layer_set_font(s_detail_header_layer,
-                        fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
+                        fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
     text_layer_set_text(s_detail_header_layer, s_detail_header_buf);
     layer_add_child(root, text_layer_get_layer(s_detail_header_layer));
 
     // Scroll + content
     s_detail_scroll_offset = 0;
-    GRect scroll_frame = GRect(0, 24, b.size.w, b.size.h - 24);
+    GRect scroll_frame = GRect(0, 28, b.size.w, b.size.h - 28);
     s_detail_scroll_layer = scroll_layer_create(scroll_frame);
     layer_add_child(root, scroll_layer_get_layer(s_detail_scroll_layer));
 
@@ -1069,7 +1069,7 @@ static void detail_window_load(Window *window) {
     text_layer_set_background_color(s_detail_content_layer, GColorClear);
     text_layer_set_text_color(s_detail_content_layer, GColorWhite);
     text_layer_set_font(s_detail_content_layer,
-                        fonts_get_system_font(FONT_KEY_GOTHIC_18));
+                        fonts_get_system_font(FONT_KEY_GOTHIC_24));
     text_layer_set_overflow_mode(s_detail_content_layer, GTextOverflowModeWordWrap);
     text_layer_set_text(s_detail_content_layer, s_history_full[s_detail_idx]);
     scroll_layer_add_child(s_detail_scroll_layer,
@@ -1164,21 +1164,21 @@ static void history_window_load(Window *window) {
         layer_add_child(root, s_hist_empty_icon);
 
         s_hist_empty_label = text_layer_create(
-            GRect(0, b.size.h / 2 + 20, b.size.w, 30));
+            GRect(0, b.size.h / 2 + 6, b.size.w, 54));
         text_layer_set_background_color(s_hist_empty_label, GColorClear);
         text_layer_set_text_color(s_hist_empty_label, GColorLightGray);
         text_layer_set_font(s_hist_empty_label,
-                            fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
+                            fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
         text_layer_set_text_alignment(s_hist_empty_label, GTextAlignmentCenter);
         text_layer_set_text(s_hist_empty_label, "No smart actions yet");
         layer_add_child(root, text_layer_get_layer(s_hist_empty_label));
 
         s_hist_empty_hint = text_layer_create(
-            GRect(0, b.size.h - 22, b.size.w, 22));
+            GRect(0, b.size.h - 28, b.size.w, 28));
         text_layer_set_background_color(s_hist_empty_hint, GColorClear);
         text_layer_set_text_color(s_hist_empty_hint, GColorDarkGray);
         text_layer_set_font(s_hist_empty_hint,
-                            fonts_get_system_font(FONT_KEY_GOTHIC_14));
+                            fonts_get_system_font(FONT_KEY_GOTHIC_18));
         text_layer_set_text_alignment(s_hist_empty_hint, GTextAlignmentCenter);
         text_layer_set_text(s_hist_empty_hint, "Press [o] to record");
         layer_add_child(root, text_layer_get_layer(s_hist_empty_hint));
@@ -1275,20 +1275,20 @@ static void reminders_list_build_ui(Window *window) {
         layer_set_update_proc(s_rem_empty_icon, history_empty_icon_draw);
         layer_add_child(root, s_rem_empty_icon);
 
-        s_rem_empty_label = text_layer_create(GRect(0, b.size.h / 2 + 20, b.size.w, 30));
+        s_rem_empty_label = text_layer_create(GRect(0, b.size.h / 2 + 6, b.size.w, 54));
         text_layer_set_background_color(s_rem_empty_label, GColorClear);
         text_layer_set_text_color(s_rem_empty_label, GColorLightGray);
         text_layer_set_font(s_rem_empty_label,
-                            fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
+                            fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
         text_layer_set_text_alignment(s_rem_empty_label, GTextAlignmentCenter);
         text_layer_set_text(s_rem_empty_label, "No local notes");
         layer_add_child(root, text_layer_get_layer(s_rem_empty_label));
 
-        s_rem_empty_hint = text_layer_create(GRect(0, b.size.h - 22, b.size.w, 22));
+        s_rem_empty_hint = text_layer_create(GRect(0, b.size.h - 44, b.size.w, 44));
         text_layer_set_background_color(s_rem_empty_hint, GColorClear);
         text_layer_set_text_color(s_rem_empty_hint, GColorDarkGray);
         text_layer_set_font(s_rem_empty_hint,
-                            fonts_get_system_font(FONT_KEY_GOTHIC_14));
+                            fonts_get_system_font(FONT_KEY_GOTHIC_18));
         text_layer_set_text_alignment(s_rem_empty_hint, GTextAlignmentCenter);
         text_layer_set_text(s_rem_empty_hint, "Press [o] to dump a thought");
         layer_add_child(root, text_layer_get_layer(s_rem_empty_hint));
@@ -1393,22 +1393,22 @@ static void rem_detail_window_load(Window *window) {
 
     // Header
     strncpy(s_rem_header_buf, "Reminder", sizeof(s_rem_header_buf) - 1);
-    s_rem_detail_header = text_layer_create(GRect(4, 2, b.size.w - 8, 20));
+    s_rem_detail_header = text_layer_create(GRect(4, 2, b.size.w - 8, 24));
     text_layer_set_background_color(s_rem_detail_header, GColorClear);
     text_layer_set_text_color(s_rem_detail_header, C_HEADER);
     text_layer_set_font(s_rem_detail_header,
-                        fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
+                        fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
     text_layer_set_overflow_mode(s_rem_detail_header, GTextOverflowModeTrailingEllipsis);
     text_layer_set_text(s_rem_detail_header, s_rem_header_buf);
     layer_add_child(root, text_layer_get_layer(s_rem_detail_header));
 
     // SELECT button label — right side, proportional Y for all models
     strncpy(s_rem_hint_buf, "Delete", sizeof(s_rem_hint_buf) - 1);
-    s_rem_detail_hint = text_layer_create(GRect(b.size.w - 52, b.size.h * 47 / 100, 50, 16));
+    s_rem_detail_hint = text_layer_create(GRect(b.size.w - 52, b.size.h * 47 / 100, 50, 20));
     text_layer_set_background_color(s_rem_detail_hint, GColorClear);
     text_layer_set_text_color(s_rem_detail_hint, C_HINT);
     text_layer_set_font(s_rem_detail_hint,
-                        fonts_get_system_font(FONT_KEY_GOTHIC_14));
+                        fonts_get_system_font(FONT_KEY_GOTHIC_18));
     text_layer_set_text_alignment(s_rem_detail_hint, GTextAlignmentRight);
     text_layer_set_text(s_rem_detail_hint, s_rem_hint_buf);
     layer_add_child(root, text_layer_get_layer(s_rem_detail_hint));
@@ -1416,7 +1416,7 @@ static void rem_detail_window_load(Window *window) {
     // Scrollable content (full height minus header)
     int si = s_rem_count - 1 - s_rem_detail_idx;
     s_rem_scroll_offset = 0;
-    GRect scroll_frame = GRect(0, 24, b.size.w, b.size.h - 24);
+    GRect scroll_frame = GRect(0, 28, b.size.w, b.size.h - 28);
     s_rem_detail_scroll = scroll_layer_create(scroll_frame);
     layer_add_child(root, scroll_layer_get_layer(s_rem_detail_scroll));
 
@@ -1425,7 +1425,7 @@ static void rem_detail_window_load(Window *window) {
     text_layer_set_background_color(s_rem_detail_content, GColorClear);
     text_layer_set_text_color(s_rem_detail_content, GColorWhite);
     text_layer_set_font(s_rem_detail_content,
-                        fonts_get_system_font(FONT_KEY_GOTHIC_18));
+                        fonts_get_system_font(FONT_KEY_GOTHIC_24));
     text_layer_set_overflow_mode(s_rem_detail_content, GTextOverflowModeWordWrap);
     text_layer_set_text(s_rem_detail_content, s_rem_text[si]);
     scroll_layer_add_child(s_rem_detail_scroll,
