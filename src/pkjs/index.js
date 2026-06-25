@@ -999,11 +999,41 @@ function routeAndSend(text, isFollowup) {
     }
 }
 
-function sendToWatch(msg) {
+// AppMessage allows only one message in flight; a second sendAppMessage before
+// the first acks fails with APP_MSG_BUSY and is dropped. Several call sites fire
+// two messages in the same tick (e.g. ROUTING_DONE then CONFIRM for a local
+// note), so serialize: enqueue, and send the next only after the prior ack/nack.
+var s_outbox_queue = [];
+var s_outbox_busy  = false;
+
+function flushOutbox() {
+    if (s_outbox_busy || s_outbox_queue.length === 0) return;
+    s_outbox_busy = true;
+    var msg = s_outbox_queue.shift();
     Pebble.sendAppMessage(msg,
-        function()  { console.log('→ watch: ' + JSON.stringify(msg)); },
-        function(e) { console.log('✗ watch: ' + JSON.stringify(e));   }
+        function()  { console.log('→ watch: ' + JSON.stringify(msg)); s_outbox_busy = false; flushOutbox(); },
+        function(e) { console.log('✗ watch: ' + JSON.stringify(e));   s_outbox_busy = false; flushOutbox(); }
     );
+}
+
+function sendToWatch(msg) {
+    s_outbox_queue.push(msg);
+    flushOutbox();
+}
+
+// Bitmask of enabled destinations, sent to the watch so it can show the right
+// status. Bit positions must match the C side. Single source of truth — both
+// the ready handler and the config-save handler use this.
+function computeDestMask(cfg) {
+    var enabled = getEnabledDests(cfg);
+    var mask = 0;
+    if (enabled.indexOf('tasks')     >= 0) mask |= 1;
+    if (enabled.indexOf('notion')    >= 0) mask |= 2;
+    if (enabled.indexOf('ai')        >= 0) mask |= 4;
+    if (enabled.indexOf('webhook')   >= 0) mask |= 8;
+    if (enabled.indexOf('todoist')   >= 0) mask |= 32;
+    if (enabled.indexOf('nextcloud') >= 0) mask |= 64;
+    return mask;
 }
 
 // ============================================================================
@@ -1013,15 +1043,7 @@ function sendToWatch(msg) {
 Pebble.addEventListener('ready', function() {
     console.log('Brain Dump JS ready');
     var cfg     = getConfig();
-    var enabled = getEnabledDests(cfg);
-    var mask = 0;
-    if (enabled.indexOf('tasks')     >= 0) mask |= 1;
-    if (enabled.indexOf('notion')    >= 0) mask |= 2;
-    if (enabled.indexOf('ai')        >= 0) mask |= 4;
-    if (enabled.indexOf('webhook')   >= 0) mask |= 8;
-    if (enabled.indexOf('todoist')   >= 0) mask |= 32;
-    if (enabled.indexOf('nextcloud') >= 0) mask |= 64;
-    sendToWatch({ DEST_MASK: mask });
+    sendToWatch({ DEST_MASK: computeDestMask(cfg) });
 
     // Proactively refresh Google access token so it's always fresh before use.
     // Access tokens expire after 1 hour; refreshing on every connect keeps them valid.
@@ -1464,14 +1486,8 @@ Pebble.addEventListener('webviewclosed', function(e) {
         var cfg = JSON.parse(decodeURIComponent(e.response));
         saveConfig(cfg);
         console.log('Config saved, dest mask recalculated');
-        // Re-send DEST_MASK to watch
-        var enabled = getEnabledDests(cfg);
-        var mask = 0;
-        if (enabled.indexOf('tasks')   >= 0) mask |= 1;
-        if (enabled.indexOf('notion')  >= 0) mask |= 2;
-        if (enabled.indexOf('ai')      >= 0) mask |= 4;
-        if (enabled.indexOf('webhook') >= 0) mask |= 8;
-        sendToWatch({ DEST_MASK: mask });
+        // Re-send DEST_MASK to watch (now includes todoist + nextcloud)
+        sendToWatch({ DEST_MASK: computeDestMask(cfg) });
     } catch(e2) {
         console.log('Config parse error: ' + e2);
     }
