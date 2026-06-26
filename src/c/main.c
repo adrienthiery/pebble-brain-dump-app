@@ -1478,24 +1478,37 @@ static void draw_merged_row(GContext *ctx, const MergedEntry *e, int y, int w, b
     }
 }
 
+// Top inset before the first row. On round, push rows clear of the top curve
+// and center the title; on rectangular it sits right under the status bar.
+#ifdef PBL_ROUND
+#  define LIST_TOP (STATUS_H + 22)
+#else
+#  define LIST_TOP STATUS_H
+#endif
+
 static void hist_list_update(Layer *layer, GContext *ctx) {
     GRect bounds = layer_get_bounds(layer);
     int w = bounds.size.w;
-    int list_h = bounds.size.h - STATUS_H;
+    int list_h = bounds.size.h - LIST_TOP;
 
     // Background
     graphics_context_set_fill_color(ctx, C_SCREEN);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 
-    // Status bar: "HISTORY" + divider
+    // Status title "HISTORY"
     graphics_context_set_text_color(ctx, C_ON_SCREEN);
+#ifdef PBL_ROUND
+    graphics_draw_text(ctx, "HISTORY", fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
+        GRect(0, LIST_TOP - 20, w, STATUS_H), GTextOverflowModeFill, GTextAlignmentCenter, NULL);
+#else
     graphics_draw_text(ctx, "HISTORY", fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
         GRect(4, 1, w - 8, STATUS_H), GTextOverflowModeFill, GTextAlignmentLeft, NULL);
     draw_status_divider(ctx, bounds);
+#endif
 
     for (int i = 0; i < s_merged_count; i++) {
-        int y = STATUS_H + i * MENU_ROW_H - s_hist_scroll;
-        if (y + MENU_ROW_H <= STATUS_H || y >= bounds.size.h) continue;  // offscreen
+        int y = LIST_TOP + i * MENU_ROW_H - s_hist_scroll;
+        if (y + MENU_ROW_H <= LIST_TOP || y >= bounds.size.h) continue;  // offscreen
         draw_merged_row(ctx, &s_merged[i], y, w, i == s_hist_sel);
     }
 
@@ -1504,7 +1517,7 @@ static void hist_list_update(Layer *layer, GContext *ctx) {
     if (total > list_h) {
         int knob_h = list_h * list_h / total;
         if (knob_h < 8) knob_h = 8;
-        int knob_y = STATUS_H + (list_h - knob_h) * s_hist_scroll / (total - list_h);
+        int knob_y = LIST_TOP + (list_h - knob_h) * s_hist_scroll / (total - list_h);
         graphics_context_set_fill_color(ctx, GColorLightGray);
         graphics_fill_rect(ctx, GRect(w - 2, knob_y, 2, knob_h), 0, GCornerNone);
     }
@@ -1520,13 +1533,13 @@ static void hist_scroll_to_selection(int visible_h) {
 
 static void hist_up_click(ClickRecognizerRef rec, void *ctx) {
     if (s_hist_sel > 0) s_hist_sel--;
-    hist_scroll_to_selection(layer_get_bounds(s_hist_list_layer).size.h - STATUS_H);
+    hist_scroll_to_selection(layer_get_bounds(s_hist_list_layer).size.h - LIST_TOP);
     layer_mark_dirty(s_hist_list_layer);
 }
 
 static void hist_down_click(ClickRecognizerRef rec, void *ctx) {
     if (s_hist_sel < s_merged_count - 1) s_hist_sel++;
-    hist_scroll_to_selection(layer_get_bounds(s_hist_list_layer).size.h - STATUS_H);
+    hist_scroll_to_selection(layer_get_bounds(s_hist_list_layer).size.h - LIST_TOP);
     layer_mark_dirty(s_hist_list_layer);
 }
 
