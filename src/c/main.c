@@ -99,9 +99,12 @@ static Window *s_success_window;
 
 // --- Home window layers ---
 static Layer       *s_canvas_layer;
+static GBitmap     *s_brain_bmp;   // hero brain-mic icon (resource)
 static TextLayer   *s_home_title_layer;
-static TextLayer   *s_home_clock_layer;
+static TextLayer   *s_home_clock_layer;   // unused on round (no clock in status bar)
+#ifndef PBL_ROUND
 static char         s_clock_buf[8];
+#endif
 static TextLayer   *s_hero_layer;
 static TextLayer   *s_meta_layer;
 
@@ -680,40 +683,17 @@ static void dictation_callback(DictationSession *session,
 // DRAW — CHROME & ICONS
 // ============================================================================
 
-// Brain outline — 87 points at scale=100.
-#define BRAIN_N 87
-static const int8_t BRAIN_PX[BRAIN_N] = {
-    -4, -5, -6, -7, -8, -8, -9,-10,-11,-12,-13,-14,-14,-14,-14,-15,-15,-15,-15,-15,
-   -14,-14,-13,-12,-12,-12,-12,-11,-10, -9, -8, -7, -6, -6, -5, -4, -3, -2, -1,  0,
-     1,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 12, 12, 12, 12, 13, 14, 14,
-    15, 15, 15, 15, 15, 14, 14, 14, 14, 13, 12, 11, 10,  9,  8,  8,  7,  6,  5,  4,
-     3,  2,  1,  0, -1, -2, -3
-};
-static const int8_t BRAIN_PY[BRAIN_N] = {
-   -15,-15,-14,-14,-13,-12,-11,-11,-10, -9, -8, -6, -5, -4, -3, -2, -1,  0,  1,  2,
-     3,  4,  5,  6,  6,  8,  9, 10, 11, 12, 12, 12, 13, 14, 15, 15, 15, 15, 14, 14,
-    14, 15, 15, 15, 15, 14, 14, 13, 12, 12, 11, 11,  9,  8,  7,  6,  6,  5,  4,  3,
-     2,  1,  0, -1, -2, -3, -4, -5, -6, -8, -9,-10,-11,-11,-12,-13,-14,-14,-15,-15,
-   -15,-15,-14,-13,-14,-15,-15
-};
-
+// Straight vertical inverted strip hugging the right edge. On round the
+// circular display naturally clips the top/bottom, but the inner (left) edge
+// stays vertical — same treatment as rectangular.
 static void draw_action_bar(GContext *ctx, GRect bounds) {
-#ifdef PBL_ROUND
-    {
-        // Thin right-edge crescent: full white disc minus a slightly larger black
-        // disc shifted left, leaving a ~30px white sliver hugging the right edge.
-        int R = bounds.size.w / 2;
-        graphics_context_set_fill_color(ctx, C_BAR);
-        graphics_fill_circle(ctx, GPoint(R, R), (uint16_t)R);
-        graphics_context_set_fill_color(ctx, C_SCREEN);
-        graphics_fill_circle(ctx, GPoint(R * 15 / 100, R), (uint16_t)(R * 152 / 100));
-    }
-#else
     graphics_context_set_fill_color(ctx, C_BAR);
     graphics_fill_rect(ctx, GRect(action_bar_x(bounds), 0, ACTION_BAR_W, bounds.size.h),
                        0, GCornerNone);
-#endif
 }
+
+// Icons are black on the white strip on every platform.
+#define ACTION_ICON_COLOR C_ON_BAR
 
 static int action_bar_icon_x(GRect bounds) {
     return action_bar_x(bounds) + ACTION_BAR_W / 2;
@@ -761,51 +741,6 @@ static void draw_icon_send(GContext *ctx, GPoint c, GColor color) {
 
 static void draw_icon_reply(GContext *ctx, GPoint c, GColor color) {
     draw_icon_send(ctx, c, color);
-}
-
-static void draw_brain_icon(GContext *ctx, GPoint center, int scale, GColor color) {
-    int cx = center.x;
-    int cy = center.y;
-
-    graphics_context_set_stroke_color(ctx, color);
-    graphics_context_set_stroke_width(ctx, 2);
-
-    for (int i = 0; i < BRAIN_N; i++) {
-        graphics_draw_line(ctx,
-            GPoint(cx + BRAIN_PX[i]             * scale / 100, cy + BRAIN_PY[i]             * scale / 100),
-            GPoint(cx + BRAIN_PX[(i + 1) % BRAIN_N] * scale / 100, cy + BRAIN_PY[(i + 1) % BRAIN_N] * scale / 100));
-    }
-
-    graphics_context_set_stroke_width(ctx, 1);
-    graphics_draw_line(ctx,
-        GPoint(cx, cy - 13 * scale / 100),
-        GPoint(cx, cy + 14 * scale / 100));
-}
-
-static void draw_mic_stem(GContext *ctx, GPoint center, int scale, GColor color) {
-    int bw = 14 * scale / 100;
-    int bh = 22 * scale / 100;
-    int br =  7 * scale / 100;
-    if (br < 2) br = 2;
-
-    GRect body = GRect(center.x - bw / 2, center.y - bh / 2, bw, bh);
-    graphics_context_set_fill_color(ctx, color);
-    graphics_fill_rect(ctx, body, (uint16_t)br, GCornersAll);
-
-    graphics_context_set_stroke_color(ctx, color);
-    graphics_context_set_stroke_width(ctx, 2);
-    int stem_top = center.y + bh / 2;
-    int stem_bottom = stem_top + 5 * scale / 100;
-    graphics_draw_line(ctx, GPoint(center.x, stem_top), GPoint(center.x, stem_bottom));
-    int base_half = 4 * scale / 100;
-    if (base_half < 2) base_half = 2;
-    graphics_draw_line(ctx, GPoint(center.x - base_half, stem_bottom),
-                            GPoint(center.x + base_half, stem_bottom));
-}
-
-static void draw_brain_mic_glyph(GContext *ctx, GPoint center, int scale, GColor color) {
-    draw_brain_icon(ctx, GPoint(center.x, center.y - 8), scale, color);
-    draw_mic_stem(ctx, GPoint(center.x, center.y + 18), scale * 85 / 100, color);
 }
 
 // --- Per-destination vector glyphs (drawn in fg color, centered at c) ---
@@ -884,8 +819,8 @@ static void confirm_canvas_update(Layer *layer, GContext *ctx) {
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
     draw_action_bar(ctx, bounds);
     int ax = action_bar_icon_x(bounds);
-    draw_icon_redo(ctx, GPoint(ax, btn_y_at(bounds, 18)), C_ON_BAR);
-    draw_icon_send(ctx, GPoint(ax, btn_y_at(bounds, 47)), C_ON_BAR);
+    draw_icon_redo(ctx, GPoint(ax, btn_y_at(bounds, 18)), ACTION_ICON_COLOR);
+    draw_icon_send(ctx, GPoint(ax, btn_y_at(bounds, 47)), ACTION_ICON_COLOR);
 }
 
 static void confirm_route_cb(void *ctx) {
@@ -1084,18 +1019,26 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
     draw_action_bar(ctx, bounds);
     draw_status_divider(ctx, bounds);
 
-#ifdef PBL_ROUND
-    int cx = bounds.size.w / 2;   // true center; thin crescent leaves room
-#else
     int cx = content_area_w(bounds) / 2;
-#endif
     int cy = bounds.size.h * 44 / 100;
-    draw_brain_mic_glyph(ctx, GPoint(cx, cy), 130, C_ON_SCREEN);
+    if (s_brain_bmp) {
+        GRect r = gbitmap_get_bounds(s_brain_bmp);
+        graphics_context_set_compositing_mode(ctx, GCompOpSet);
+        graphics_draw_bitmap_in_rect(ctx, s_brain_bmp,
+            GRect(cx - r.size.w / 2, cy - r.size.h / 2, r.size.w, r.size.h));
+    }
 
     int ax = action_bar_icon_x(bounds);
     // SELECT sits at the physical middle button → exact vertical center.
-    draw_icon_hamburger(ctx, GPoint(ax, btn_y_at(bounds, 18)), C_ON_BAR);
-    draw_icon_record(ctx, GPoint(ax, bounds.size.h / 2), C_ON_BAR);
+    // History (UP): on round, align with the physical UP button (~30%); on
+    // rect it sits near the top of the strip.
+#ifdef PBL_ROUND
+    int hist_y = btn_y_at(bounds, 30);
+#else
+    int hist_y = btn_y_at(bounds, 18);
+#endif
+    draw_icon_hamburger(ctx, GPoint(ax, hist_y), ACTION_ICON_COLOR);
+    draw_icon_record(ctx, GPoint(ax, bounds.size.h / 2), ACTION_ICON_COLOR);
 
     if (s_waiting_response) {
         graphics_context_set_fill_color(ctx, C_ON_SCREEN);
@@ -1130,6 +1073,7 @@ static void home_click_config(void *ctx) {
 #endif
 }
 
+#ifndef PBL_ROUND
 static void home_clock_tick(struct tm *tick_time, TimeUnits changed) {
     if (!s_home_clock_layer) return;
     if (clock_is_24h_style()) {
@@ -1142,11 +1086,13 @@ static void home_clock_tick(struct tm *tick_time, TimeUnits changed) {
     }
     text_layer_set_text(s_home_clock_layer, s_clock_buf);
 }
+#endif
 
 static void home_window_load(Window *window) {
     Layer *root = window_get_root_layer(window);
     GRect b = layer_get_bounds(root);
     int content_w = content_area_w(b);
+    (void)content_w;   // only used in the rectangular status-bar layout below
 
     window_set_background_color(window, C_SCREEN);
 
@@ -1277,7 +1223,7 @@ static void resp_canvas_update(Layer *layer, GContext *ctx) {
     graphics_context_set_fill_color(ctx, C_SCREEN);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
     draw_action_bar(ctx, bounds);
-    draw_icon_reply(ctx, GPoint(action_bar_icon_x(bounds), btn_y_at(bounds, 47)), C_ON_BAR);
+    draw_icon_reply(ctx, GPoint(action_bar_icon_x(bounds), btn_y_at(bounds, 47)), ACTION_ICON_COLOR);
 }
 
 static void response_window_load(Window *window) {
@@ -1878,6 +1824,9 @@ static void init(void) {
     dictation_session_enable_confirmation(s_dictation_session, false);
     dictation_session_enable_error_dialogs(s_dictation_session, true);
 
+    // Hero icon
+    s_brain_bmp = gbitmap_create_with_resource(RESOURCE_ID_IMG_BRAIN_MIC);
+
     // Load persistent data
     history_load_from_persist();
     reminders_load_from_persist();
@@ -1900,6 +1849,7 @@ static void deinit(void) {
         dictation_session_destroy(s_dictation_session);
         s_dictation_session = NULL;
     }
+    if (s_brain_bmp)         { gbitmap_destroy(s_brain_bmp); s_brain_bmp = NULL; }
     if (s_success_window)    { window_destroy(s_success_window);    }
     if (s_rem_detail_window) { window_destroy(s_rem_detail_window); }
     if (s_detail_window)     { window_destroy(s_detail_window);     }
