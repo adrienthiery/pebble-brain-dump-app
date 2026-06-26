@@ -152,6 +152,10 @@ static int         s_merged_count = 0;
 static TextLayer  *s_hist_empty_label;
 static TextLayer  *s_hist_empty_hint;
 
+// Shared status-bar clock TextLayer for the drill-down reading views (detail
+// and reminder-detail never coexist). Rectangular only.
+static TextLayer  *s_drill_clock_layer;
+
 // --- Detail window layers ---
 static TextLayer  *s_detail_header_layer;
 static ScrollLayer *s_detail_scroll_layer;
@@ -699,6 +703,41 @@ static int action_bar_icon_x(GRect bounds) {
     return action_bar_x(bounds) + ACTION_BAR_W / 2;
 }
 
+// Current time, top-right of the status bar. Round drops the clock (centered
+// title only), so these are rectangular-only.
+#ifndef PBL_ROUND
+static void refresh_clock_buf(void) {
+    time_t now = time(NULL);
+    struct tm *t = localtime(&now);
+    if (clock_is_24h_style()) {
+        snprintf(s_clock_buf, sizeof(s_clock_buf), "%02d:%02d", t->tm_hour, t->tm_min);
+    } else {
+        int h = t->tm_hour % 12; if (h == 0) h = 12;
+        snprintf(s_clock_buf, sizeof(s_clock_buf), "%d:%02d", h, t->tm_min);
+    }
+}
+
+// Draw the clock right-aligned with its right edge at right_x.
+static void draw_status_clock(GContext *ctx, int right_x) {
+    refresh_clock_buf();
+    graphics_context_set_text_color(ctx, C_ON_SCREEN);
+    graphics_draw_text(ctx, s_clock_buf, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
+        GRect(right_x - 50, 1, 48, STATUS_H), GTextOverflowModeFill, GTextAlignmentRight, NULL);
+}
+
+// Add the shared drill-view clock TextLayer to a window root (right edge at right_x).
+static void add_drill_clock(Layer *root, int right_x) {
+    refresh_clock_buf();
+    s_drill_clock_layer = text_layer_create(GRect(right_x - 50, 1, 48, STATUS_H));
+    text_layer_set_background_color(s_drill_clock_layer, GColorClear);
+    text_layer_set_text_color(s_drill_clock_layer, C_ON_SCREEN);
+    text_layer_set_font(s_drill_clock_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
+    text_layer_set_text_alignment(s_drill_clock_layer, GTextAlignmentRight);
+    text_layer_set_text(s_drill_clock_layer, s_clock_buf);
+    layer_add_child(root, text_layer_get_layer(s_drill_clock_layer));
+}
+#endif
+
 // 1px hairline beneath the status bar (handoff: ~10% white). DarkGray is the
 // closest representable tone on the 64-color display; invisible on 1-bit.
 static void draw_status_divider(GContext *ctx, GRect bounds) {
@@ -714,13 +753,13 @@ static void draw_icon_record(GContext *ctx, GPoint c, GColor color) {
     graphics_fill_circle(ctx, c, 8);
 }
 
+// History glyph: three lines, third ~60% width (paragraph, not a burger menu).
 static void draw_icon_hamburger(GContext *ctx, GPoint c, GColor color) {
     graphics_context_set_stroke_color(ctx, color);
     graphics_context_set_stroke_width(ctx, 2);
-    for (int i = -1; i <= 1; i++) {
-        graphics_draw_line(ctx, GPoint(c.x - 7, c.y + i * 4),
-                                GPoint(c.x + 7, c.y + i * 4));
-    }
+    graphics_draw_line(ctx, GPoint(c.x - 7, c.y - 4), GPoint(c.x + 7, c.y - 4));
+    graphics_draw_line(ctx, GPoint(c.x - 7, c.y),     GPoint(c.x + 7, c.y));
+    graphics_draw_line(ctx, GPoint(c.x - 7, c.y + 4), GPoint(c.x + 1, c.y + 4));
 }
 
 static void draw_icon_redo(GContext *ctx, GPoint c, GColor color) {
@@ -818,6 +857,9 @@ static void confirm_canvas_update(Layer *layer, GContext *ctx) {
     graphics_context_set_fill_color(ctx, C_SCREEN);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
     draw_action_bar(ctx, bounds);
+#ifndef PBL_ROUND
+    draw_status_clock(ctx, content_area_w(bounds));
+#endif
     int ax = action_bar_icon_x(bounds);
     draw_icon_redo(ctx, GPoint(ax, btn_y_at(bounds, 18)), ACTION_ICON_COLOR);
     draw_icon_send(ctx, GPoint(ax, btn_y_at(bounds, 47)), ACTION_ICON_COLOR);
@@ -1019,7 +1061,14 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
     draw_action_bar(ctx, bounds);
     draw_status_divider(ctx, bounds);
 
+    // Round centers across the full width (the clipped strip leaves room and
+    // the text below is also full-width centered); rect centers in the content
+    // area left of the strip.
+#ifdef PBL_ROUND
+    int cx = bounds.size.w / 2;
+#else
     int cx = content_area_w(bounds) / 2;
+#endif
     int cy = bounds.size.h * 44 / 100;
     if (s_brain_bmp) {
         GRect r = gbitmap_get_bounds(s_brain_bmp);
@@ -1033,7 +1082,7 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
     // History (UP): on round, align with the physical UP button (~30%); on
     // rect it sits near the top of the strip.
 #ifdef PBL_ROUND
-    int hist_y = btn_y_at(bounds, 30);
+    int hist_y = btn_y_at(bounds, 38);
 #else
     int hist_y = btn_y_at(bounds, 18);
 #endif
@@ -1223,6 +1272,9 @@ static void resp_canvas_update(Layer *layer, GContext *ctx) {
     graphics_context_set_fill_color(ctx, C_SCREEN);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
     draw_action_bar(ctx, bounds);
+#ifndef PBL_ROUND
+    draw_status_clock(ctx, content_area_w(bounds));
+#endif
     draw_icon_reply(ctx, GPoint(action_bar_icon_x(bounds), btn_y_at(bounds, 47)), ACTION_ICON_COLOR);
 }
 
@@ -1320,7 +1372,12 @@ static void detail_window_load(Window *window) {
     strncpy(s_detail_header_buf, s_history_short[s_detail_idx], sizeof(s_detail_header_buf) - 1);
     s_detail_header_buf[sizeof(s_detail_header_buf) - 1] = '\0';
 
-    s_detail_header_layer = text_layer_create(GRect(4, 1, content_w - 8, STATUS_H));
+#ifdef PBL_ROUND
+    int hdr_w = content_w - 8;
+#else
+    int hdr_w = content_w - 56;   // leave room for the clock
+#endif
+    s_detail_header_layer = text_layer_create(GRect(4, 1, hdr_w, STATUS_H));
     text_layer_set_background_color(s_detail_header_layer, GColorClear);
     text_layer_set_text_color(s_detail_header_layer, C_ON_SCREEN);
     text_layer_set_font(s_detail_header_layer,
@@ -1328,6 +1385,9 @@ static void detail_window_load(Window *window) {
     text_layer_set_overflow_mode(s_detail_header_layer, GTextOverflowModeTrailingEllipsis);
     text_layer_set_text(s_detail_header_layer, s_detail_header_buf);
     layer_add_child(root, text_layer_get_layer(s_detail_header_layer));
+#ifndef PBL_ROUND
+    add_drill_clock(root, content_w);
+#endif
 
     s_detail_scroll_offset = 0;
     GRect scroll_frame = GRect(0, STATUS_H + 2, content_w, b.size.h - STATUS_H - 2);
@@ -1356,6 +1416,7 @@ static void detail_window_unload(Window *window) {
     text_layer_destroy(s_detail_header_layer);   s_detail_header_layer  = NULL;
     text_layer_destroy(s_detail_content_layer);  s_detail_content_layer = NULL;
     scroll_layer_destroy(s_detail_scroll_layer); s_detail_scroll_layer  = NULL;
+    if (s_drill_clock_layer) { text_layer_destroy(s_drill_clock_layer); s_drill_clock_layer = NULL; }
 }
 
 // ============================================================================
@@ -1462,6 +1523,7 @@ static void hist_list_update(Layer *layer, GContext *ctx) {
 #else
     graphics_draw_text(ctx, "HISTORY", fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
         GRect(4, 1, w - 8, STATUS_H), GTextOverflowModeFill, GTextAlignmentLeft, NULL);
+    draw_status_clock(ctx, w);
     draw_status_divider(ctx, bounds);
 #endif
 
@@ -1640,7 +1702,12 @@ static void rem_detail_window_load(Window *window) {
     window_set_background_color(window, C_SCREEN);
 
     strncpy(s_rem_header_buf, "NOTE", sizeof(s_rem_header_buf) - 1);
-    s_rem_detail_header = text_layer_create(GRect(4, 1, content_w - 8, STATUS_H));
+#ifdef PBL_ROUND
+    int rhdr_w = content_w - 8;
+#else
+    int rhdr_w = content_w - 56;   // leave room for the clock
+#endif
+    s_rem_detail_header = text_layer_create(GRect(4, 1, rhdr_w, STATUS_H));
     text_layer_set_background_color(s_rem_detail_header, GColorClear);
     text_layer_set_text_color(s_rem_detail_header, C_ON_SCREEN);
     text_layer_set_font(s_rem_detail_header,
@@ -1648,6 +1715,9 @@ static void rem_detail_window_load(Window *window) {
     text_layer_set_overflow_mode(s_rem_detail_header, GTextOverflowModeTrailingEllipsis);
     text_layer_set_text(s_rem_detail_header, s_rem_header_buf);
     layer_add_child(root, text_layer_get_layer(s_rem_detail_header));
+#ifndef PBL_ROUND
+    add_drill_clock(root, content_w);
+#endif
 
     strncpy(s_rem_hint_buf, "DEL", sizeof(s_rem_hint_buf) - 1);
     s_rem_detail_hint = text_layer_create(GRect(content_w - 40, b.size.h * 47 / 100, 36, 20));
@@ -1687,6 +1757,7 @@ static void rem_detail_window_unload(Window *window) {
     text_layer_destroy(s_rem_detail_hint);    s_rem_detail_hint    = NULL;
     text_layer_destroy(s_rem_detail_content); s_rem_detail_content = NULL;
     scroll_layer_destroy(s_rem_detail_scroll); s_rem_detail_scroll  = NULL;
+    if (s_drill_clock_layer) { text_layer_destroy(s_drill_clock_layer); s_drill_clock_layer = NULL; }
 }
 
 // ============================================================================
