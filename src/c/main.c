@@ -728,13 +728,10 @@ static void draw_status_divider(GContext *ctx, GRect bounds) {
     graphics_draw_line(ctx, GPoint(4, STATUS_H), GPoint(w - 4, STATUS_H));
 }
 
-// Record / dump chip — filled rounded square enclosing a record dot.
+// Record / dump button — a single filled disk centered at c.
 static void draw_icon_record(GContext *ctx, GPoint c, GColor color) {
-    GColor hole = gcolor_equal(color, C_ON_BAR) ? C_BAR : C_ON_BAR;
     graphics_context_set_fill_color(ctx, color);
-    graphics_fill_rect(ctx, GRect(c.x - 9, c.y - 9, 18, 18), 4, GCornersAll);
-    graphics_context_set_fill_color(ctx, hole);
-    graphics_fill_circle(ctx, c, 4);
+    graphics_fill_circle(ctx, c, 8);
 }
 
 static void draw_icon_hamburger(GContext *ctx, GPoint c, GColor color) {
@@ -992,13 +989,18 @@ static void success_canvas_update(Layer *layer, GContext *ctx) {
     graphics_context_set_fill_color(ctx, C_SCREEN);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 
-    // Status bar: "SAVED" (dimmed) + clock (white)
+    // Status bar: round centers the title alone; rect shows title + clock.
     graphics_context_set_text_color(ctx, GColorLightGray);
+#ifdef PBL_ROUND
+    graphics_draw_text(ctx, "SAVED", fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
+        GRect(0, 1, w, STATUS_H), GTextOverflowModeFill, GTextAlignmentCenter, NULL);
+#else
     graphics_draw_text(ctx, "SAVED", fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
         GRect(4, 1, w - 56, STATUS_H), GTextOverflowModeFill, GTextAlignmentLeft, NULL);
     graphics_context_set_text_color(ctx, C_ON_SCREEN);
     graphics_draw_text(ctx, s_clock_buf, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
         GRect(w - 52, 1, 48, STATUS_H), GTextOverflowModeFill, GTextAlignmentRight, NULL);
+#endif
 
     // Medallion: ring + check
     int med_cy = h * 27 / 100;
@@ -1091,8 +1093,9 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
     draw_brain_mic_glyph(ctx, GPoint(cx, cy), 130, C_ON_SCREEN);
 
     int ax = action_bar_icon_x(bounds);
+    // SELECT sits at the physical middle button → exact vertical center.
     draw_icon_hamburger(ctx, GPoint(ax, btn_y_at(bounds, 18)), C_ON_BAR);
-    draw_icon_record(ctx, GPoint(ax, btn_y_at(bounds, 47)), C_ON_BAR);
+    draw_icon_record(ctx, GPoint(ax, bounds.size.h / 2), C_ON_BAR);
 
     if (s_waiting_response) {
         graphics_context_set_fill_color(ctx, C_ON_SCREEN);
@@ -1151,7 +1154,13 @@ static void home_window_load(Window *window) {
     layer_set_update_proc(s_canvas_layer, canvas_update_proc);
     layer_add_child(root, s_canvas_layer);
 
+    // Status bar. Round: centered title, no clock. Rect: left title + right clock.
+#ifdef PBL_ROUND
+    s_home_title_layer = text_layer_create(GRect(0, 1, b.size.w, STATUS_H));
+    text_layer_set_text_alignment(s_home_title_layer, GTextAlignmentCenter);
+#else
     s_home_title_layer = text_layer_create(GRect(4, 1, content_w - 52, STATUS_H));
+#endif
     text_layer_set_background_color(s_home_title_layer, GColorClear);
     text_layer_set_text_color(s_home_title_layer, GColorLightGray);
     text_layer_set_font(s_home_title_layer,
@@ -1159,6 +1168,7 @@ static void home_window_load(Window *window) {
     text_layer_set_text(s_home_title_layer, "DUMP");
     layer_add_child(root, text_layer_get_layer(s_home_title_layer));
 
+#ifndef PBL_ROUND
     s_home_clock_layer = text_layer_create(GRect(content_w - 52, 1, 48, STATUS_H));
     text_layer_set_background_color(s_home_clock_layer, GColorClear);
     text_layer_set_text_color(s_home_clock_layer, C_ON_SCREEN);
@@ -1171,6 +1181,7 @@ static void home_window_load(Window *window) {
     time_t now = time(NULL);
     struct tm *tick_time = localtime(&now);
     home_clock_tick(tick_time, MINUTE_UNIT);
+#endif
 
     int hero_y = b.size.h * 58 / 100;
 #ifdef PBL_ROUND
@@ -1204,7 +1215,9 @@ static void home_window_load(Window *window) {
 static void home_window_unload(Window *window) {
     layer_destroy(s_canvas_layer);              s_canvas_layer       = NULL;
     text_layer_destroy(s_home_title_layer);     s_home_title_layer   = NULL;
-    text_layer_destroy(s_home_clock_layer);     s_home_clock_layer   = NULL;
+    if (s_home_clock_layer) {  // not created on round
+        text_layer_destroy(s_home_clock_layer); s_home_clock_layer   = NULL;
+    }
     text_layer_destroy(s_hero_layer);           s_hero_layer         = NULL;
     text_layer_destroy(s_meta_layer);           s_meta_layer         = NULL;
 }
