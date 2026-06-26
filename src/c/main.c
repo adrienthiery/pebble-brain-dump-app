@@ -146,11 +146,8 @@ static Layer     *s_hist_list_layer;
 static int        s_hist_sel    = 0;   // selected row
 static int        s_hist_scroll = 0;   // scroll offset in px
 static int        s_hist_row_w  = 144;
-static TextLayer *s_hist_title_layer;
 static MergedEntry s_merged[MAX_MERGED];
 static int         s_merged_count = 0;
-static TextLayer  *s_hist_empty_label;
-static TextLayer  *s_hist_empty_hint;
 
 // Shared status-bar clock TextLayer for the drill-down reading views (detail
 // and reminder-detail never coexist). Rectangular only.
@@ -1509,6 +1506,7 @@ static void draw_merged_row(GContext *ctx, const MergedEntry *e, int y, int w, b
 static void hist_list_update(Layer *layer, GContext *ctx) {
     GRect bounds = layer_get_bounds(layer);
     int w = bounds.size.w;
+    int h = bounds.size.h;
     int list_h = bounds.size.h - LIST_TOP;
 
     // Background
@@ -1526,6 +1524,20 @@ static void hist_list_update(Layer *layer, GContext *ctx) {
     draw_status_clock(ctx, w);
     draw_status_divider(ctx, bounds);
 #endif
+
+    // Empty state: message + a record affordance (half-disk on the right edge).
+    if (s_merged_count == 0) {
+        graphics_context_set_text_color(ctx, C_ON_SCREEN);
+        graphics_draw_text(ctx, "NO ENTRIES", fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD),
+            GRect(0, h / 2 - 30, w, 36), GTextOverflowModeFill, GTextAlignmentCenter, NULL);
+        graphics_context_set_text_color(ctx, GColorLightGray);
+        graphics_draw_text(ctx, "PRESS TO SPEAK", fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
+            GRect(0, h - 30, w, 24), GTextOverflowModeFill, GTextAlignmentCenter, NULL);
+        // Record disk centered on the right edge → half visible.
+        graphics_context_set_fill_color(ctx, C_ON_SCREEN);
+        graphics_fill_circle(ctx, GPoint(w, h / 2), 11);
+        return;
+    }
 
     for (int i = 0; i < s_merged_count; i++) {
         int y = LIST_TOP + i * MENU_ROW_H - s_hist_scroll;
@@ -1600,54 +1612,22 @@ static void history_window_load(Window *window) {
     window_set_background_color(window, C_SCREEN);
     merged_rebuild();
 
-    if (s_merged_count == 0) {
-        // Status title for the empty state
-        s_hist_title_layer = text_layer_create(GRect(4, 1, content_w - 8, STATUS_H));
-        text_layer_set_background_color(s_hist_title_layer, GColorClear);
-        text_layer_set_text_color(s_hist_title_layer, C_ON_SCREEN);
-        text_layer_set_font(s_hist_title_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
-        text_layer_set_text(s_hist_title_layer, "HISTORY");
-        layer_add_child(root, text_layer_get_layer(s_hist_title_layer));
-
-        s_hist_empty_label = text_layer_create(GRect(0, b.size.h / 2 - 20, content_w, 32));
-        text_layer_set_background_color(s_hist_empty_label, GColorClear);
-        text_layer_set_text_color(s_hist_empty_label, C_ON_SCREEN);
-        text_layer_set_font(s_hist_empty_label,
-                            fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD));
-        text_layer_set_text_alignment(s_hist_empty_label, GTextAlignmentCenter);
-        text_layer_set_text(s_hist_empty_label, "NO ENTRIES");
-        layer_add_child(root, text_layer_get_layer(s_hist_empty_label));
-
-        s_hist_empty_hint = text_layer_create(GRect(0, b.size.h - 28, content_w, 28));
-        text_layer_set_background_color(s_hist_empty_hint, GColorClear);
-        text_layer_set_text_color(s_hist_empty_hint, C_ON_SCREEN);
-        text_layer_set_font(s_hist_empty_hint,
-                            fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
-        text_layer_set_text_alignment(s_hist_empty_hint, GTextAlignmentCenter);
-        text_layer_set_text(s_hist_empty_hint, "PRESS TO SPEAK");
-        layer_add_child(root, text_layer_get_layer(s_hist_empty_hint));
-        window_set_click_config_provider(window, hist_empty_click_config);
-        return;
-    }
-
+    // One canvas renders both the list and the empty state (title, clock,
+    // message, record affordance) so the chrome is identical either way.
     s_hist_row_w  = content_w;
     s_hist_sel    = 0;
     s_hist_scroll = 0;
     s_hist_list_layer = layer_create(GRect(0, 0, content_w, b.size.h));
     layer_set_update_proc(s_hist_list_layer, hist_list_update);
     layer_add_child(root, s_hist_list_layer);
-    window_set_click_config_provider(window, hist_list_click_config);
+
+    // Empty → SELECT records; populated → up/down/select navigates.
+    window_set_click_config_provider(window,
+        (s_merged_count == 0) ? hist_empty_click_config : hist_list_click_config);
 }
 
 static void history_window_unload(Window *window) {
-    if (s_hist_title_layer)  { text_layer_destroy(s_hist_title_layer);  s_hist_title_layer = NULL; }
-    if (s_hist_list_layer)   { layer_destroy(s_hist_list_layer);        s_hist_list_layer = NULL; }
-    if (s_hist_empty_label) {
-        text_layer_destroy(s_hist_empty_label);
-        s_hist_empty_label = NULL;
-        text_layer_destroy(s_hist_empty_hint);
-        s_hist_empty_hint = NULL;
-    }
+    if (s_hist_list_layer) { layer_destroy(s_hist_list_layer); s_hist_list_layer = NULL; }
 }
 
 // ============================================================================
