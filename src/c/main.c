@@ -23,7 +23,8 @@
 // We split it: a small meta record (short+dest+ts, ~53 B) per slot, plus the
 // full transcript chunked across HISTORY_FULL_CHUNKS string keys.
 #define PERSIST_HISTORY_VERSION_KEY  0
-#define PERSIST_HISTORY_VERSION      4   // bump when layout changes (was 3: oversized blob)
+#define PERSIST_HISTORY_VERSION      5   // v5: HistoryMeta.external_id for remote complete
+#define HISTORY_EXT_ID_LEN          40
 #define PERSIST_HISTORY_COUNT        1
 #define PERSIST_HISTORY_BASE        10   // meta records at 10..17
 #define HISTORY_FULL_CHUNK         200   // bytes per full-text chunk (< 256 persist cap)
@@ -60,13 +61,21 @@
 #define C_ON_BAR   GColorBlack
 
 // Layout chrome (Time 2 handoff spec)
-#define STATUS_H       18
+#define STATUS_H              18
+#define STATUS_TITLE_X         4
+#define STATUS_CLOCK_W        48
+#define STATUS_CLOCK_RIGHT_PAD 3   // inset from content-area right edge
+#define STATUS_CLOCK_GAP       4   // gap between title and clock
+#define STATUS_CLOCK_X(right_x) \
+    ((right_x) - STATUS_CLOCK_RIGHT_PAD - STATUS_CLOCK_W)
+#define STATUS_HDR_TITLE_W(content_w) \
+    (STATUS_CLOCK_X(content_w) - STATUS_CLOCK_GAP - STATUS_TITLE_X)
 #define ACTION_BAR_W   33
-#define MENU_ROW_H     44
+#define MENU_ROW_H     54
 #define ICON_SIZE      18
-#define MENU_TILE_SIZE 24
+#define MENU_TILE_SIZE 28
 #define MAX_MERGED     (MAX_HISTORY + MAX_REMINDERS)
-#define MERGED_META_LEN 24
+#define MERGED_META_LEN 40
 
 // ============================================================================
 // DATA TYPES
@@ -77,6 +86,7 @@ typedef struct __attribute__((packed)) {
     char     short_text[HISTORY_SHORT_LEN];
     uint8_t  dest;
     uint32_t timestamp;
+    char     external_id[HISTORY_EXT_ID_LEN];
 } HistoryMeta;
 
 typedef struct __attribute__((packed)) {
@@ -116,12 +126,15 @@ static AppTimer *s_success_timer = NULL;
 
 // --- Confirm window ---
 static Layer     *s_confirm_canvas_layer;
+static Layer     *s_confirm_divider_layer;
 static TextLayer *s_confirm_title_layer;
 static TextLayer *s_confirm_content_layer;
 static TextLayer *s_confirm_target_layer;
+static TextLayer *s_confirm_due_layer;
 static bool       s_confirm_is_followup;
 static bool       s_confirm_open      = false;
 static char       s_confirm_target_buf[32];
+static char       s_confirm_due_buf[32];
 
 // --- Response window layers ---
 static TextLayer  *s_resp_header_layer;
@@ -154,9 +167,12 @@ static int         s_merged_count = 0;
 static TextLayer  *s_drill_clock_layer;
 
 // --- Detail window layers ---
+static Layer       *s_detail_canvas_layer;
 static TextLayer  *s_detail_header_layer;
 static ScrollLayer *s_detail_scroll_layer;
 static TextLayer  *s_detail_content_layer;
+static bool        s_detail_confirm = false;
+static char        s_detail_header_buf[HISTORY_SHORT_LEN];
 
 // --- Dictation ---
 static DictationSession *s_dictation_session;
@@ -181,22 +197,22 @@ static int16_t s_detail_scroll_offset = 0;
 static int      s_history_count = 0;
 static char     s_history_short[MAX_HISTORY][HISTORY_SHORT_LEN];
 static char     s_history_full [MAX_HISTORY][HISTORY_FULL_LEN];
+static char     s_history_ext_id[MAX_HISTORY][HISTORY_EXT_ID_LEN];
 static uint8_t  s_history_dest [MAX_HISTORY];
 static uint32_t s_history_ts   [MAX_HISTORY];
 static int      s_detail_idx    = 0;
 
 // --- Reminders (local storage) ---
+static Layer     *s_rem_detail_canvas_layer;
 static TextLayer *s_rem_detail_header;
 static ScrollLayer *s_rem_detail_scroll;
 static TextLayer *s_rem_detail_content;
-static TextLayer *s_rem_detail_hint;
 static int      s_rem_count      = 0;
 static char     s_rem_text[MAX_REMINDERS][REMINDER_TEXT_LEN];
 static uint32_t s_rem_ts[MAX_REMINDERS];
 static int      s_rem_detail_idx = 0;
 static bool     s_rem_confirm    = false;
 static int16_t  s_rem_scroll_offset = 0;
-static char     s_rem_hint_buf[40];
 static char     s_rem_header_buf[32];
 
 // ============================================================================
@@ -216,28 +232,16 @@ static void success_window_push(int dest);
 // HELPERS
 // ============================================================================
 
-static const char *dest_short_name(int dest) {
+// Full product name for a destination — used in every user-facing label.
+static const char *dest_full_name(int dest) {
     switch (dest) {
-        case DEST_TASKS:   return "Tasks";
-        case DEST_NOTION:  return "Notion";
-        case DEST_AI:      return "AI";
-        case DEST_WEBHOOK: return "Hook";
-        case DEST_LOCAL:   return "Local";
-        case DEST_TODOIST:   return "Todoist";
-        case DEST_NEXTCLOUD: return "Cloud";
-        default:           return "?";
-    }
-}
-
-static const char *dest_meta_name(int dest) {
-    switch (dest) {
-        case DEST_TASKS:     return "TASKS";
-        case DEST_NOTION:    return "NOTION";
+        case DEST_TASKS:     return "Google Tasks";
+        case DEST_NOTION:    return "Notion";
         case DEST_AI:        return "AI";
-        case DEST_WEBHOOK:   return "HOOK";
-        case DEST_LOCAL:     return "NOTE";
-        case DEST_TODOIST:   return "TODOIST";
-        case DEST_NEXTCLOUD: return "CLOUD";
+        case DEST_WEBHOOK:   return "Webhook";
+        case DEST_LOCAL:     return "Local Note";
+        case DEST_TODOIST:   return "Todoist";
+        case DEST_NEXTCLOUD: return "Nextcloud";
         default:             return "?";
     }
 }
@@ -255,20 +259,50 @@ static int btn_y_at(GRect bounds, int pct) {
     return bounds.size.h * pct / 100;
 }
 
+// Shared vertical positions for action-bar icons, used on every screen so the
+// UP and SELECT glyphs line up identically. SELECT is the exact middle (the
+// physical middle button); UP sits above it (a bit lower on round to clear the
+// top curve and match the physical button).
+#ifdef PBL_ROUND
+#  define BTN_UP_PCT 38
+#else
+#  define BTN_UP_PCT 23
+#endif
+static int btn_up_y(GRect b)     { return b.size.h * BTN_UP_PCT / 100; }
+static int btn_select_y(GRect b) { return b.size.h / 2; }
+
+// "Destination · <when>": time only if today, date + time if an earlier day.
 static void format_relative_meta(uint32_t ts, int dest, char *buf, size_t len) {
-    const char *name = dest_meta_name(dest);
-    uint32_t now = (uint32_t)time(NULL);
-    uint32_t diff = (now > ts) ? (now - ts) : 0;
-    // "\xC2\xB7" = middot (·) in UTF-8, per handoff meta separator
-    if (diff < 60) {
-        snprintf(buf, len, "%s \xC2\xB7 NOW", name);
-    } else if (diff < 3600) {
-        snprintf(buf, len, "%s \xC2\xB7 %luM", name, (unsigned long)(diff / 60));
-    } else if (diff < 86400) {
-        snprintf(buf, len, "%s \xC2\xB7 %luH", name, (unsigned long)(diff / 3600));
+    const char *name = dest_full_name(dest);
+
+    time_t tt = (time_t)ts;
+    struct tm entry = *localtime(&tt);          // copy — localtime returns a shared buffer
+    time_t nowt = time(NULL);
+    struct tm now = *localtime(&nowt);
+    bool today = (entry.tm_year == now.tm_year && entry.tm_yday == now.tm_yday);
+
+    char when[28];
+    bool h24 = clock_is_24h_style();
+    if (today) {
+        strftime(when, sizeof(when), h24 ? "%H:%M" : "%l:%M %p", &entry);
     } else {
-        snprintf(buf, len, "%s \xC2\xB7 %luD", name, (unsigned long)(diff / 86400));
+        strftime(when, sizeof(when), h24 ? "%d %b %H:%M" : "%d %b %l:%M %p", &entry);
     }
+    // Trim any leading space %l can produce for single-digit hours.
+    char *wp = when; while (*wp == ' ') wp++;
+    snprintf(buf, len, "%s \xC2\xB7 %s", name, wp);
+}
+
+static bool is_phone_connected(void) {
+    return connection_service_peek_pebble_app_connection();
+}
+
+static void refresh_home_idle_ui(void) {
+    if (!s_hero_layer || !s_meta_layer) return;
+    if (strcmp(s_status_buf, "Ready") != 0) return;
+    text_layer_set_text(s_hero_layer, "READY");
+    text_layer_set_text(s_meta_layer,
+        is_phone_connected() ? "PRESS TO SPEAK" : "NO PHONE · LOCAL ONLY");
 }
 
 static void set_status(const char *msg) {
@@ -276,8 +310,7 @@ static void set_status(const char *msg) {
     s_status_buf[STATUS_BUF_SIZE - 1] = '\0';
     if (!s_hero_layer) return;
     if (strcmp(msg, "Ready") == 0) {
-        text_layer_set_text(s_hero_layer, "READY");
-        if (s_meta_layer) text_layer_set_text(s_meta_layer, "PRESS TO SPEAK");
+        refresh_home_idle_ui();
     } else {
         text_layer_set_text(s_hero_layer, msg);
         if (s_meta_layer) text_layer_set_text(s_meta_layer, "");
@@ -357,13 +390,17 @@ static void history_load_from_persist(void) {
         history_read_full(slot, s_history_full[s_history_count], HISTORY_FULL_LEN);
         s_history_dest[s_history_count] = s_hist_meta_buf.dest;
         s_history_ts  [s_history_count] = s_hist_meta_buf.timestamp;
+        strncpy(s_history_ext_id[s_history_count], s_hist_meta_buf.external_id,
+                HISTORY_EXT_ID_LEN - 1);
+        s_history_ext_id[s_history_count][HISTORY_EXT_ID_LEN - 1] = '\0';
         s_history_count++;
     }
 }
 
 // question → short_text (list label); response → full_text (detail view).
 // Pass NULL for response to use question as both (non-AI destinations).
-static void history_save_item(const char *question, const char *response, int dest) {
+static void history_save_item(const char *question, const char *response, int dest,
+                              const char *external_id) {
     int stored = persist_exists(PERSIST_HISTORY_COUNT)
                  ? persist_read_int(PERSIST_HISTORY_COUNT) : 0;
     int slot = stored % MAX_HISTORY;
@@ -372,6 +409,9 @@ static void history_save_item(const char *question, const char *response, int de
     strncpy(s_hist_meta_buf.short_text, question, HISTORY_SHORT_LEN - 1);
     s_hist_meta_buf.dest      = (uint8_t)dest;
     s_hist_meta_buf.timestamp = (uint32_t)time(NULL);
+    if (external_id && external_id[0]) {
+        strncpy(s_hist_meta_buf.external_id, external_id, HISTORY_EXT_ID_LEN - 1);
+    }
 
     persist_write_data((uint32_t)(PERSIST_HISTORY_BASE + slot), &s_hist_meta_buf, sizeof(s_hist_meta_buf));
     history_write_full(slot, response ? response : question);
@@ -392,6 +432,42 @@ static void history_update_latest(const char *response) {
         strncpy(s_history_full[0], response, HISTORY_FULL_LEN - 1);
         s_history_full[0][HISTORY_FULL_LEN - 1] = '\0';
     }
+}
+
+static void history_rewrite_persist(void) {
+    int n = s_history_count;
+    persist_write_int(PERSIST_HISTORY_COUNT, n);
+    for (int i = 0; i < n; i++) {
+        int slot = ((n - 1 - i) % MAX_HISTORY + MAX_HISTORY) % MAX_HISTORY;
+        strncpy(s_hist_meta_buf.short_text, s_history_short[i], HISTORY_SHORT_LEN - 1);
+        s_hist_meta_buf.short_text[HISTORY_SHORT_LEN - 1] = '\0';
+        s_hist_meta_buf.dest = s_history_dest[i];
+        s_hist_meta_buf.timestamp = s_history_ts[i];
+        strncpy(s_hist_meta_buf.external_id, s_history_ext_id[i], HISTORY_EXT_ID_LEN - 1);
+        persist_write_data((uint32_t)(PERSIST_HISTORY_BASE + slot),
+                           &s_hist_meta_buf, sizeof(s_hist_meta_buf));
+        history_write_full(slot, s_history_full[i]);
+    }
+}
+
+// display_idx: 0 = newest (same order as s_history_* arrays).
+static void appmsg_complete_task(const char *external_id);
+
+static void history_delete(int display_idx) {
+    if (display_idx < 0 || display_idx >= s_history_count) return;
+    if (s_history_dest[display_idx] == DEST_TASKS &&
+        s_history_ext_id[display_idx][0]) {
+        appmsg_complete_task(s_history_ext_id[display_idx]);
+    }
+    for (int i = display_idx; i < s_history_count - 1; i++) {
+        strncpy(s_history_short[i], s_history_short[i + 1], HISTORY_SHORT_LEN);
+        strncpy(s_history_full[i], s_history_full[i + 1], HISTORY_FULL_LEN);
+        strncpy(s_history_ext_id[i], s_history_ext_id[i + 1], HISTORY_EXT_ID_LEN);
+        s_history_dest[i] = s_history_dest[i + 1];
+        s_history_ts[i] = s_history_ts[i + 1];
+    }
+    s_history_count--;
+    history_rewrite_persist();
 }
 
 // ============================================================================
@@ -535,7 +611,25 @@ static void appmsg_classify_note(const char *text) {
     app_message_outbox_send();
 }
 
+static void appmsg_complete_task(const char *external_id) {
+    DictionaryIterator *iter;
+    if (app_message_outbox_begin(&iter) != APP_MSG_OK) return;
+    dict_write_int8(iter, MESSAGE_KEY_COMPLETE_TASK, 1);
+    dict_write_cstring(iter, MESSAGE_KEY_EXTERNAL_ID, external_id);
+    app_message_outbox_send();
+}
+
 static void route_note(bool is_followup) {
+    if (!is_phone_connected()) {
+        if (is_followup) {
+            set_status("Connect phone for AI");
+            return;
+        }
+        reminders_add(s_note_buf);
+        set_status("Saved locally ✓");
+        success_window_push(DEST_LOCAL);
+        return;
+    }
     if (s_dest_mask == 0 && !is_followup) {
         reminders_add(s_note_buf);
         set_status("Saved to reminders");
@@ -571,8 +665,15 @@ static void inbox_received_callback(DictionaryIterator *iter, void *context) {
         if (s_confirm_open && s_confirm_target_layer) {
             // Classify-only response — update target label on confirm screen
             snprintf(s_confirm_target_buf, sizeof(s_confirm_target_buf),
-                     "-> %s", dest_meta_name(dest));
+                     "\xe2\x86\x92 %s", dest_full_name(dest));
             text_layer_set_text(s_confirm_target_layer, s_confirm_target_buf);
+            // Extracted due date/time, shown under the destination
+            Tuple *due_t = dict_find(iter, MESSAGE_KEY_DUE_LABEL);
+            if (due_t && due_t->value->cstring[0] && s_confirm_due_layer) {
+                snprintf(s_confirm_due_buf, sizeof(s_confirm_due_buf),
+                         "due %s", due_t->value->cstring);
+                text_layer_set_text(s_confirm_due_layer, s_confirm_due_buf);
+            }
         } else {
             if (dest == DEST_AI) {
                 set_status("Waiting for answer...");
@@ -593,9 +694,12 @@ static void inbox_received_callback(DictionaryIterator *iter, void *context) {
                 reminders_add(s_note_buf);
                 set_status("Saved locally ✓");
             } else {
-                history_save_item(s_note_buf, NULL, dest);
+                Tuple *ext_t = dict_find(iter, MESSAGE_KEY_EXTERNAL_ID);
+                const char *ext_id = (ext_t && ext_t->value->cstring[0])
+                                     ? ext_t->value->cstring : NULL;
+                history_save_item(s_note_buf, NULL, dest, ext_id);
                 char msg[STATUS_BUF_SIZE];
-                snprintf(msg, sizeof(msg), "Sent → %s ✓", dest_short_name(dest));
+                snprintf(msg, sizeof(msg), "Sent → %s ✓", dest_full_name(dest));
                 set_status(msg);
             }
             success_window_push(dest);
@@ -627,7 +731,7 @@ static void inbox_received_callback(DictionaryIterator *iter, void *context) {
         } else {
             Tuple *dest_t = dict_find(iter, MESSAGE_KEY_DEST_USED);
             int dest = dest_t ? (int)dest_t->value->int32 : DEST_AI;
-            history_save_item(s_note_buf, s_conversation_buf, dest);
+            history_save_item(s_note_buf, s_conversation_buf, dest, NULL);
             s_in_ai_thread = true;
         }
         if (s_response_open) {
@@ -714,18 +818,20 @@ static void refresh_clock_buf(void) {
     }
 }
 
-// Draw the clock right-aligned with its right edge at right_x.
+// Draw the clock right-aligned with its right edge inset from right_x.
 static void draw_status_clock(GContext *ctx, int right_x) {
     refresh_clock_buf();
     graphics_context_set_text_color(ctx, C_ON_SCREEN);
     graphics_draw_text(ctx, s_clock_buf, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
-        GRect(right_x - 50, 1, 48, STATUS_H), GTextOverflowModeFill, GTextAlignmentRight, NULL);
+        GRect(STATUS_CLOCK_X(right_x), 1, STATUS_CLOCK_W, STATUS_H),
+        GTextOverflowModeFill, GTextAlignmentRight, NULL);
 }
 
-// Add the shared drill-view clock TextLayer to a window root (right edge at right_x).
+// Add the shared drill-view clock TextLayer to a window root.
 static void add_drill_clock(Layer *root, int right_x) {
     refresh_clock_buf();
-    s_drill_clock_layer = text_layer_create(GRect(right_x - 50, 1, 48, STATUS_H));
+    s_drill_clock_layer = text_layer_create(
+        GRect(STATUS_CLOCK_X(right_x), 1, STATUS_CLOCK_W, STATUS_H));
     text_layer_set_background_color(s_drill_clock_layer, GColorClear);
     text_layer_set_text_color(s_drill_clock_layer, C_ON_SCREEN);
     text_layer_set_font(s_drill_clock_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
@@ -735,13 +841,26 @@ static void add_drill_clock(Layer *root, int right_x) {
 }
 #endif
 
-// 1px hairline beneath the status bar (handoff: ~10% white). DarkGray is the
-// closest representable tone on the 64-color display; invisible on 1-bit.
+// 1px hairline beneath the status bar. White so it vanishes over the action bar.
 static void draw_status_divider(GContext *ctx, GRect bounds) {
-    graphics_context_set_stroke_color(ctx, GColorDarkGray);
+    graphics_context_set_stroke_color(ctx, C_BAR);
     graphics_context_set_stroke_width(ctx, 1);
-    int w = content_area_w(bounds);
+    int w = bounds.size.w;
     graphics_draw_line(ctx, GPoint(4, STATUS_H), GPoint(w - 4, STATUS_H));
+}
+
+static void status_divider_layer_update(Layer *layer, GContext *ctx) {
+    GRect b = layer_get_bounds(layer);
+    graphics_context_set_stroke_color(ctx, C_BAR);
+    graphics_context_set_stroke_width(ctx, 1);
+    graphics_draw_line(ctx, GPoint(4, 0), GPoint(b.size.w - 4, 0));
+}
+
+static Layer *add_status_divider_layer(Layer *root, int width) {
+    Layer *layer = layer_create(GRect(0, STATUS_H - 1, width, 1));
+    layer_set_update_proc(layer, status_divider_layer_update);
+    layer_add_child(root, layer);
+    return layer;
 }
 
 // Record / dump button — a single filled disk centered at c.
@@ -759,24 +878,58 @@ static void draw_icon_hamburger(GContext *ctx, GPoint c, GColor color) {
     graphics_draw_line(ctx, GPoint(c.x - 7, c.y + 4), GPoint(c.x + 1, c.y + 4));
 }
 
-static void draw_icon_redo(GContext *ctx, GPoint c, GColor color) {
+// Review-screen redo: clockwise arc, mirrored arrowhead, shifted 1px right.
+static void draw_icon_redo_review(GContext *ctx, GPoint c, GColor color) {
+    GPoint rc = GPoint(c.x + 1, c.y);
     graphics_context_set_stroke_color(ctx, color);
     graphics_context_set_stroke_width(ctx, 2);
-    graphics_draw_circle(ctx, c, 8);
-    graphics_draw_line(ctx, GPoint(c.x + 5, c.y - 7), GPoint(c.x + 9, c.y - 3));
-    graphics_draw_line(ctx, GPoint(c.x + 5, c.y - 7), GPoint(c.x + 3, c.y - 3));
+    int r = 7;
+    GRect box = GRect(rc.x - r, rc.y - r, 2 * r, 2 * r);
+    int32_t a = DEG_TO_TRIGANGLE(340);
+    graphics_draw_arc(ctx, box, GOvalScaleModeFitCircle, DEG_TO_TRIGANGLE(20), a);
+
+    int ca = cos_lookup(a), sa = sin_lookup(a);
+    int px = rc.x + sa * r / TRIG_MAX_RATIO;
+    int py = rc.y - ca * r / TRIG_MAX_RATIO;
+    int Tx = ca, Ty = sa;
+    int Nx = sa, Ny = -ca;    // mirrored normal (opposite side of tangent)
+    int L = 6;
+    GPoint p  = GPoint(px, py);
+    GPoint b1 = GPoint(px + (-Tx + Nx) * L / TRIG_MAX_RATIO,
+                       py + (-Ty + Ny) * L / TRIG_MAX_RATIO);
+    GPoint b2 = GPoint(px + (-Tx - Nx) * L / TRIG_MAX_RATIO,
+                       py + (-Ty - Ny) * L / TRIG_MAX_RATIO);
+    graphics_draw_line(ctx, p, b1);
+    graphics_draw_line(ctx, p, b2);
 }
 
+// Send: a right-pointing arrow.
 static void draw_icon_send(GContext *ctx, GPoint c, GColor color) {
     graphics_context_set_stroke_color(ctx, color);
     graphics_context_set_stroke_width(ctx, 2);
-    graphics_draw_line(ctx, GPoint(c.x, c.y + 7), GPoint(c.x, c.y - 5));
-    graphics_draw_line(ctx, GPoint(c.x - 6, c.y - 1), GPoint(c.x, c.y - 7));
-    graphics_draw_line(ctx, GPoint(c.x + 6, c.y - 1), GPoint(c.x, c.y - 7));
+    graphics_draw_line(ctx, GPoint(c.x - 7, c.y), GPoint(c.x + 7, c.y));
+    graphics_draw_line(ctx, GPoint(c.x + 7, c.y), GPoint(c.x + 1, c.y - 5));
+    graphics_draw_line(ctx, GPoint(c.x + 7, c.y), GPoint(c.x + 1, c.y + 5));
 }
 
 static void draw_icon_reply(GContext *ctx, GPoint c, GColor color) {
     draw_icon_send(ctx, c, color);
+}
+
+// Trash can — solid filled delete affordance on history detail.
+static void draw_icon_trash(GContext *ctx, GPoint c, GColor color) {
+    graphics_context_set_fill_color(ctx, color);
+    graphics_fill_rect(ctx, GRect(c.x - 3, c.y - 9, 6, 2), 0, GCornerNone);
+    graphics_fill_rect(ctx, GRect(c.x - 7, c.y - 7, 14, 3), 0, GCornerNone);
+    graphics_fill_rect(ctx, GRect(c.x - 5, c.y - 4, 10, 11), 0, GCornerNone);
+}
+
+// Checkmark — confirm / accept affordance.
+static void draw_icon_checkmark(GContext *ctx, GPoint c, GColor color) {
+    graphics_context_set_stroke_color(ctx, color);
+    graphics_context_set_stroke_width(ctx, 2);
+    graphics_draw_line(ctx, GPoint(c.x - 6, c.y), GPoint(c.x - 2, c.y + 5));
+    graphics_draw_line(ctx, GPoint(c.x - 2, c.y + 5), GPoint(c.x + 7, c.y - 5));
 }
 
 // --- Per-destination vector glyphs (drawn in fg color, centered at c) ---
@@ -858,8 +1011,8 @@ static void confirm_canvas_update(Layer *layer, GContext *ctx) {
     draw_status_clock(ctx, content_area_w(bounds));
 #endif
     int ax = action_bar_icon_x(bounds);
-    draw_icon_redo(ctx, GPoint(ax, btn_y_at(bounds, 18)), ACTION_ICON_COLOR);
-    draw_icon_send(ctx, GPoint(ax, btn_y_at(bounds, 47)), ACTION_ICON_COLOR);
+    draw_icon_redo_review(ctx, GPoint(ax, btn_up_y(bounds)), ACTION_ICON_COLOR);
+    draw_icon_checkmark(ctx, GPoint(ax, btn_select_y(bounds)), ACTION_ICON_COLOR);
 }
 
 static void confirm_route_cb(void *ctx) {
@@ -898,7 +1051,8 @@ static void confirm_window_load(Window *window) {
     layer_set_update_proc(s_confirm_canvas_layer, confirm_canvas_update);
     layer_add_child(root, s_confirm_canvas_layer);
 
-    s_confirm_title_layer = text_layer_create(GRect(4, 1, content_w, STATUS_H));
+    s_confirm_title_layer = text_layer_create(
+        GRect(STATUS_TITLE_X, 1, STATUS_HDR_TITLE_W(content_area_w(b)), STATUS_H));
     text_layer_set_background_color(s_confirm_title_layer, GColorClear);
     text_layer_set_text_color(s_confirm_title_layer, C_ON_SCREEN);
     text_layer_set_font(s_confirm_title_layer,
@@ -906,8 +1060,10 @@ static void confirm_window_load(Window *window) {
     text_layer_set_text(s_confirm_title_layer, "REVIEW");
     layer_add_child(root, text_layer_get_layer(s_confirm_title_layer));
 
+    s_confirm_divider_layer = add_status_divider_layer(root, b.size.w);
+
     s_confirm_content_layer = text_layer_create(
-        GRect(4, STATUS_H + 4, content_w, b.size.h - STATUS_H - 34));
+        GRect(4, STATUS_H + 4, content_w, b.size.h - STATUS_H - 46));
     text_layer_set_background_color(s_confirm_content_layer, GColorClear);
     text_layer_set_text_color(s_confirm_content_layer, C_ON_SCREEN);
     text_layer_set_font(s_confirm_content_layer,
@@ -916,9 +1072,10 @@ static void confirm_window_load(Window *window) {
     text_layer_set_text(s_confirm_content_layer, s_note_buf);
     layer_add_child(root, text_layer_get_layer(s_confirm_content_layer));
 
-    snprintf(s_confirm_target_buf, sizeof(s_confirm_target_buf), "-> ?");
+    // Destination ("→ Google Tasks") + any extracted due date/time below it.
+    snprintf(s_confirm_target_buf, sizeof(s_confirm_target_buf), "\xe2\x86\x92 ?");
     s_confirm_target_layer = text_layer_create(
-        GRect(4, b.size.h - 22, content_w, 18));
+        GRect(4, b.size.h - 40, content_w, 18));
     text_layer_set_background_color(s_confirm_target_layer, GColorClear);
     text_layer_set_text_color(s_confirm_target_layer, C_ON_SCREEN);
     text_layer_set_font(s_confirm_target_layer,
@@ -926,15 +1083,41 @@ static void confirm_window_load(Window *window) {
     text_layer_set_text(s_confirm_target_layer, s_confirm_target_buf);
     layer_add_child(root, text_layer_get_layer(s_confirm_target_layer));
 
+    s_confirm_due_buf[0] = '\0';
+    s_confirm_due_layer = text_layer_create(
+        GRect(4, b.size.h - 21, content_w, 16));
+    text_layer_set_background_color(s_confirm_due_layer, GColorClear);
+    text_layer_set_text_color(s_confirm_due_layer, GColorLightGray);
+    text_layer_set_font(s_confirm_due_layer,
+                        fonts_get_system_font(FONT_KEY_GOTHIC_14));
+    text_layer_set_text(s_confirm_due_layer, s_confirm_due_buf);
+    layer_add_child(root, text_layer_get_layer(s_confirm_due_layer));
+
+    if (!is_phone_connected()) {
+        snprintf(s_confirm_target_buf, sizeof(s_confirm_target_buf),
+                 "\xe2\x86\x92 %s", dest_full_name(DEST_LOCAL));
+        text_layer_set_text(s_confirm_target_layer, s_confirm_target_buf);
+        text_layer_set_text(s_confirm_due_layer, "");
+    }
+
+#ifdef DEBUG_SEED
+    snprintf(s_confirm_target_buf, sizeof(s_confirm_target_buf), "\xe2\x86\x92 Google Tasks");
+    text_layer_set_text(s_confirm_target_layer, s_confirm_target_buf);
+    snprintf(s_confirm_due_buf, sizeof(s_confirm_due_buf), "due Tomorrow 09:00");
+    text_layer_set_text(s_confirm_due_layer, s_confirm_due_buf);
+#endif
+
     window_set_click_config_provider(window, confirm_click_config);
     s_confirm_open = true;
 }
 
 static void confirm_window_unload(Window *window) {
     layer_destroy(s_confirm_canvas_layer);     s_confirm_canvas_layer  = NULL;
+    layer_destroy(s_confirm_divider_layer);    s_confirm_divider_layer = NULL;
     text_layer_destroy(s_confirm_title_layer); s_confirm_title_layer = NULL;
     text_layer_destroy(s_confirm_content_layer); s_confirm_content_layer = NULL;
     text_layer_destroy(s_confirm_target_layer);  s_confirm_target_layer  = NULL;
+    text_layer_destroy(s_confirm_due_layer);     s_confirm_due_layer     = NULL;
     s_confirm_open = false;
 }
 
@@ -942,7 +1125,7 @@ static void confirm_window_unload(Window *window) {
 // SUCCESS ("DUMPED") WINDOW — post-dump confirmation, auto-dismiss ~1.5s
 // ============================================================================
 
-#define SUCCESS_DISMISS_MS 1500
+#define SUCCESS_DISMISS_MS 10000
 
 // Larger check mark for the medallion (scaled by radius r around center c).
 static void draw_check_big(GContext *ctx, GPoint c, int r, GColor fg) {
@@ -970,10 +1153,14 @@ static void success_canvas_update(Layer *layer, GContext *ctx) {
         GRect(0, 1, w, STATUS_H), GTextOverflowModeFill, GTextAlignmentCenter, NULL);
 #else
     graphics_draw_text(ctx, "SAVED", fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
-        GRect(4, 1, w - 56, STATUS_H), GTextOverflowModeFill, GTextAlignmentLeft, NULL);
+        GRect(STATUS_TITLE_X, 1, STATUS_HDR_TITLE_W(w), STATUS_H),
+        GTextOverflowModeFill, GTextAlignmentLeft, NULL);
     graphics_context_set_text_color(ctx, C_ON_SCREEN);
+    refresh_clock_buf();
     graphics_draw_text(ctx, s_clock_buf, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
-        GRect(w - 52, 1, 48, STATUS_H), GTextOverflowModeFill, GTextAlignmentRight, NULL);
+        GRect(STATUS_CLOCK_X(w), 1, STATUS_CLOCK_W, STATUS_H),
+        GTextOverflowModeFill, GTextAlignmentRight, NULL);
+    draw_status_divider(ctx, bounds);
 #endif
 
     // Medallion: ring + check
@@ -990,7 +1177,7 @@ static void success_canvas_update(Layer *layer, GContext *ctx) {
         GRect(0, h * 43 / 100, w, 30), GTextOverflowModeFill, GTextAlignmentCenter, NULL);
 
     // Destination chip: bordered tile + name caps, centered as a group
-    const char *name = dest_meta_name(s_success_dest);
+    const char *name = dest_full_name(s_success_dest);
     GFont chip_font = fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD);
     GSize ns = graphics_text_layout_get_content_size(name, chip_font,
         GRect(0, 0, w, 20), GTextOverflowModeFill, GTextAlignmentLeft);
@@ -1015,12 +1202,14 @@ static void success_dismiss_cb(void *ctx) {
     s_success_timer = NULL;
     if (s_success_window && window_stack_get_top_window() == s_success_window) {
         window_stack_pop(true);
+        set_status("Ready");   // restore READY / PRESS TO SPEAK on home
     }
 }
 
 static void success_dismiss_click(ClickRecognizerRef rec, void *ctx) {
     if (s_success_timer) { app_timer_cancel(s_success_timer); s_success_timer = NULL; }
     window_stack_pop(true);
+    set_status("Ready");
 }
 
 static void success_click_config(void *ctx) {
@@ -1050,6 +1239,12 @@ static void success_window_unload(Window *window) {
 // HOME WINDOW
 // ============================================================================
 
+static void connection_handler(bool connected) {
+    (void)connected;
+    refresh_home_idle_ui();
+    if (s_canvas_layer) layer_mark_dirty(s_canvas_layer);
+}
+
 static void canvas_update_proc(Layer *layer, GContext *ctx) {
     GRect bounds = layer_get_bounds(layer);
 
@@ -1075,28 +1270,19 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
     }
 
     int ax = action_bar_icon_x(bounds);
-    // SELECT sits at the physical middle button → exact vertical center.
-    // History (UP): on round, align with the physical UP button (~30%); on
-    // rect it sits near the top of the strip.
-#ifdef PBL_ROUND
-    int hist_y = btn_y_at(bounds, 38);
-#else
-    int hist_y = btn_y_at(bounds, 18);
-#endif
-    draw_icon_hamburger(ctx, GPoint(ax, hist_y), ACTION_ICON_COLOR);
-    draw_icon_record(ctx, GPoint(ax, bounds.size.h / 2), ACTION_ICON_COLOR);
+    draw_icon_hamburger(ctx, GPoint(ax, btn_up_y(bounds)),     ACTION_ICON_COLOR);
+    draw_icon_record(ctx,    GPoint(ax, btn_select_y(bounds)), ACTION_ICON_COLOR);
 
     if (s_waiting_response) {
         graphics_context_set_fill_color(ctx, C_ON_SCREEN);
+        graphics_fill_circle(ctx, GPoint(content_area_w(bounds) - 6, 6), 3);
+    } else if (!is_phone_connected()) {
+        graphics_context_set_fill_color(ctx, GColorLightGray);
         graphics_fill_circle(ctx, GPoint(content_area_w(bounds) - 6, 6), 3);
     }
 }
 
 static void home_select_click(ClickRecognizerRef rec, void *ctx) {
-    if (!connection_service_peek_pebble_app_connection()) {
-        set_status("Connect phone first");
-        return;
-    }
     dictation_session_start(s_dictation_session);
 }
 
@@ -1106,8 +1292,8 @@ static void home_up_click(ClickRecognizerRef rec, void *ctx) {
 
 #ifdef DEBUG_SEED
 static void home_debug_success_click(ClickRecognizerRef rec, void *ctx) {
-    strncpy(s_note_buf, "Draft the Q3 deck outline for Sarah", NOTE_BUF_SIZE - 1);
-    success_window_push(DEST_NOTION);
+    strncpy(s_note_buf, "Buy oat milk tomorrow at 9am", NOTE_BUF_SIZE - 1);
+    confirm_window_push();   // review screen (target/due prefilled in load)
 }
 #endif
 
@@ -1151,7 +1337,7 @@ static void home_window_load(Window *window) {
     s_home_title_layer = text_layer_create(GRect(0, 1, b.size.w, STATUS_H));
     text_layer_set_text_alignment(s_home_title_layer, GTextAlignmentCenter);
 #else
-    s_home_title_layer = text_layer_create(GRect(4, 1, content_w - 52, STATUS_H));
+    s_home_title_layer = text_layer_create(GRect(STATUS_TITLE_X, 1, STATUS_HDR_TITLE_W(content_w), STATUS_H));
 #endif
     text_layer_set_background_color(s_home_title_layer, GColorClear);
     text_layer_set_text_color(s_home_title_layer, GColorLightGray);
@@ -1161,7 +1347,8 @@ static void home_window_load(Window *window) {
     layer_add_child(root, text_layer_get_layer(s_home_title_layer));
 
 #ifndef PBL_ROUND
-    s_home_clock_layer = text_layer_create(GRect(content_w - 52, 1, 48, STATUS_H));
+    s_home_clock_layer = text_layer_create(
+        GRect(STATUS_CLOCK_X(content_w), 1, STATUS_CLOCK_W, STATUS_H));
     text_layer_set_background_color(s_home_clock_layer, GColorClear);
     text_layer_set_text_color(s_home_clock_layer, C_ON_SCREEN);
     text_layer_set_font(s_home_clock_layer,
@@ -1202,6 +1389,7 @@ static void home_window_load(Window *window) {
     window_set_click_config_provider(window, home_click_config);
 
     strncpy(s_status_buf, "Ready", STATUS_BUF_SIZE - 1);
+    refresh_home_idle_ui();
 }
 
 static void home_window_unload(Window *window) {
@@ -1239,8 +1427,8 @@ static void resp_down_click(ClickRecognizerRef rec, void *ctx) {
 }
 
 static void resp_select_click(ClickRecognizerRef rec, void *ctx) {
-    if (!connection_service_peek_pebble_app_connection()) {
-        set_status("Connect phone first");
+    if (!is_phone_connected()) {
+        set_status("Connect phone for AI");
         return;
     }
     s_is_followup = true;
@@ -1271,8 +1459,9 @@ static void resp_canvas_update(Layer *layer, GContext *ctx) {
     draw_action_bar(ctx, bounds);
 #ifndef PBL_ROUND
     draw_status_clock(ctx, content_area_w(bounds));
+    draw_status_divider(ctx, bounds);
 #endif
-    draw_icon_reply(ctx, GPoint(action_bar_icon_x(bounds), btn_y_at(bounds, 47)), ACTION_ICON_COLOR);
+    draw_icon_reply(ctx, GPoint(action_bar_icon_x(bounds), btn_select_y(bounds)), ACTION_ICON_COLOR);
 }
 
 static void response_window_load(Window *window) {
@@ -1286,7 +1475,8 @@ static void response_window_load(Window *window) {
     layer_set_update_proc(s_resp_canvas_layer, resp_canvas_update);
     layer_add_child(root, s_resp_canvas_layer);
 
-    s_resp_header_layer = text_layer_create(GRect(4, 1, content_w - 8, STATUS_H));
+    s_resp_header_layer = text_layer_create(
+        GRect(STATUS_TITLE_X, 1, STATUS_HDR_TITLE_W(content_w), STATUS_H));
     text_layer_set_background_color(s_resp_header_layer, GColorClear);
     text_layer_set_text_color(s_resp_header_layer, C_ON_SCREEN);
     text_layer_set_font(s_resp_header_layer,
@@ -1353,9 +1543,40 @@ static void detail_down_click(ClickRecognizerRef rec, void *ctx) {
         GPoint(0, -s_detail_scroll_offset), true);
 }
 
+static void detail_select_click(ClickRecognizerRef rec, void *ctx) {
+    if (!s_detail_confirm) {
+        s_detail_confirm = true;
+        strncpy(s_detail_header_buf, "Delete?", sizeof(s_detail_header_buf) - 1);
+        s_detail_header_buf[sizeof(s_detail_header_buf) - 1] = '\0';
+        text_layer_set_text(s_detail_header_layer, s_detail_header_buf);
+        layer_mark_dirty(s_detail_canvas_layer);
+    } else {
+        history_delete(s_detail_idx);
+        window_stack_pop(true);
+    }
+}
+
 static void detail_click_config(void *ctx) {
-    window_single_click_subscribe(BUTTON_ID_UP,   detail_up_click);
-    window_single_click_subscribe(BUTTON_ID_DOWN, detail_down_click);
+    window_single_click_subscribe(BUTTON_ID_UP,     detail_up_click);
+    window_single_click_subscribe(BUTTON_ID_DOWN,   detail_down_click);
+    window_single_click_subscribe(BUTTON_ID_SELECT, detail_select_click);
+}
+
+static void detail_canvas_update(Layer *layer, GContext *ctx) {
+    GRect bounds = layer_get_bounds(layer);
+    graphics_context_set_fill_color(ctx, C_SCREEN);
+    graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+    draw_action_bar(ctx, bounds);
+#ifndef PBL_ROUND
+    draw_status_clock(ctx, content_area_w(bounds));
+    draw_status_divider(ctx, bounds);
+#endif
+    int ax = action_bar_icon_x(bounds);
+    if (s_detail_confirm) {
+        draw_icon_checkmark(ctx, GPoint(ax, btn_select_y(bounds)), ACTION_ICON_COLOR);
+    } else {
+        draw_icon_trash(ctx, GPoint(ax, btn_select_y(bounds)), ACTION_ICON_COLOR);
+    }
 }
 
 static void detail_window_load(Window *window) {
@@ -1365,16 +1586,19 @@ static void detail_window_load(Window *window) {
 
     window_set_background_color(window, C_SCREEN);
 
-    static char s_detail_header_buf[HISTORY_SHORT_LEN];
+    s_detail_canvas_layer = layer_create(b);
+    layer_set_update_proc(s_detail_canvas_layer, detail_canvas_update);
+    layer_add_child(root, s_detail_canvas_layer);
+
     strncpy(s_detail_header_buf, s_history_short[s_detail_idx], sizeof(s_detail_header_buf) - 1);
     s_detail_header_buf[sizeof(s_detail_header_buf) - 1] = '\0';
 
 #ifdef PBL_ROUND
     int hdr_w = content_w - 8;
 #else
-    int hdr_w = content_w - 56;   // leave room for the clock
+    int hdr_w = STATUS_HDR_TITLE_W(content_w);
 #endif
-    s_detail_header_layer = text_layer_create(GRect(4, 1, hdr_w, STATUS_H));
+    s_detail_header_layer = text_layer_create(GRect(STATUS_TITLE_X, 1, hdr_w, STATUS_H));
     text_layer_set_background_color(s_detail_header_layer, GColorClear);
     text_layer_set_text_color(s_detail_header_layer, C_ON_SCREEN);
     text_layer_set_font(s_detail_header_layer,
@@ -1410,6 +1634,7 @@ static void detail_window_load(Window *window) {
 }
 
 static void detail_window_unload(Window *window) {
+    layer_destroy(s_detail_canvas_layer);        s_detail_canvas_layer  = NULL;
     text_layer_destroy(s_detail_header_layer);   s_detail_header_layer  = NULL;
     text_layer_destroy(s_detail_content_layer);  s_detail_content_layer = NULL;
     scroll_layer_destroy(s_detail_scroll_layer); s_detail_scroll_layer  = NULL;
@@ -1466,6 +1691,30 @@ static void merged_item_open(int index) {
     }
 }
 
+// Total list content height (entries + end-of-list footer).
+static int hist_content_height(void) {
+    return s_merged_count > 0 ? (s_merged_count + 1) * MENU_ROW_H : 0;
+}
+
+static int hist_max_scroll(int list_h) {
+    int max = hist_content_height() - list_h;
+    return max > 0 ? max : 0;
+}
+
+// Scroll offset that keeps the last real entry visible (footer may stay below).
+static int hist_last_item_scroll(int list_h) {
+    if (s_merged_count <= 0) return 0;
+    int top = (s_merged_count - 1) * MENU_ROW_H;
+    int max = top + MENU_ROW_H - list_h;
+    return max > 0 ? max : 0;
+}
+
+static void draw_hist_footer_row(GContext *ctx, int y, int w) {
+    graphics_context_set_text_color(ctx, GColorLightGray);
+    graphics_draw_text(ctx, "NO MORE ENTRIES", fonts_get_system_font(FONT_KEY_GOTHIC_14),
+        GRect(0, y + 18, w, 20), GTextOverflowModeFill, GTextAlignmentCenter, NULL);
+}
+
 // Draw one merged row at top-left (0,y) within width w.
 static void draw_merged_row(GContext *ctx, const MergedEntry *e, int y, int w, bool selected) {
     graphics_context_set_fill_color(ctx, selected ? C_BAR : C_SCREEN);
@@ -1480,12 +1729,12 @@ static void draw_merged_row(GContext *ctx, const MergedEntry *e, int y, int w, b
     int text_x = tile_cx + MENU_TILE_SIZE / 2 + 8;
     int text_w = w - text_x - 4;
     graphics_context_set_text_color(ctx, fg);
-    graphics_draw_text(ctx, e->title, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
-        GRect(text_x, y + 3, text_w, 20),
+    graphics_draw_text(ctx, e->title, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
+        GRect(text_x, y + 6, text_w, 22),
         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
     graphics_context_set_text_color(ctx, meta_fg);
     graphics_draw_text(ctx, e->meta, fonts_get_system_font(FONT_KEY_GOTHIC_14),
-        GRect(text_x, y + 23, text_w, 16),
+        GRect(text_x, y + 27, text_w, 16),
         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
     // Row divider (skip under a selected/inverted row)
@@ -1513,6 +1762,8 @@ static void hist_list_update(Layer *layer, GContext *ctx) {
     graphics_context_set_fill_color(ctx, C_SCREEN);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 
+    bool empty = (s_merged_count == 0);
+
     // Status title "HISTORY"
     graphics_context_set_text_color(ctx, C_ON_SCREEN);
 #ifdef PBL_ROUND
@@ -1520,22 +1771,29 @@ static void hist_list_update(Layer *layer, GContext *ctx) {
         GRect(0, LIST_TOP - 20, w, STATUS_H), GTextOverflowModeFill, GTextAlignmentCenter, NULL);
 #else
     graphics_draw_text(ctx, "HISTORY", fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
-        GRect(4, 1, w - 8, STATUS_H), GTextOverflowModeFill, GTextAlignmentLeft, NULL);
-    draw_status_clock(ctx, w);
+        GRect(STATUS_TITLE_X, 1, STATUS_HDR_TITLE_W(w), STATUS_H),
+        GTextOverflowModeFill, GTextAlignmentLeft, NULL);
+    // Clock sits left of the action bar on the empty state, at the far edge
+    // on the full-width populated list.
+    draw_status_clock(ctx, empty ? content_area_w(bounds) : w);
     draw_status_divider(ctx, bounds);
 #endif
 
-    // Empty state: message + a record affordance (half-disk on the right edge).
-    if (s_merged_count == 0) {
+    // Empty state: full action bar + record button, message aligned with it.
+    if (empty) {
+        draw_action_bar(ctx, bounds);
+        draw_icon_record(ctx, GPoint(action_bar_icon_x(bounds), btn_select_y(bounds)), ACTION_ICON_COLOR);
+#ifdef PBL_ROUND
+        int tw = w;                       // center across full width on round
+#else
+        int tw = content_area_w(bounds);  // center in the area left of the bar
+#endif
         graphics_context_set_text_color(ctx, C_ON_SCREEN);
         graphics_draw_text(ctx, "NO ENTRIES", fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD),
-            GRect(0, h / 2 - 30, w, 36), GTextOverflowModeFill, GTextAlignmentCenter, NULL);
+            GRect(0, h / 2 - 22, tw, 36), GTextOverflowModeFill, GTextAlignmentCenter, NULL);
         graphics_context_set_text_color(ctx, GColorLightGray);
         graphics_draw_text(ctx, "PRESS TO SPEAK", fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
-            GRect(0, h - 30, w, 24), GTextOverflowModeFill, GTextAlignmentCenter, NULL);
-        // Record disk centered on the right edge → half visible.
-        graphics_context_set_fill_color(ctx, C_ON_SCREEN);
-        graphics_fill_circle(ctx, GPoint(w, h / 2), 11);
+            GRect(0, h / 2 + 16, tw, 20), GTextOverflowModeFill, GTextAlignmentCenter, NULL);
         return;
     }
 
@@ -1545,8 +1803,13 @@ static void hist_list_update(Layer *layer, GContext *ctx) {
         draw_merged_row(ctx, &s_merged[i], y, w, i == s_hist_sel);
     }
 
+    int footer_y = LIST_TOP + s_merged_count * MENU_ROW_H - s_hist_scroll;
+    if (footer_y + MENU_ROW_H > LIST_TOP && footer_y < bounds.size.h) {
+        draw_hist_footer_row(ctx, footer_y, w);
+    }
+
     // Scroll indicator on the far right edge
-    int total = s_merged_count * MENU_ROW_H;
+    int total = hist_content_height();
     if (total > list_h) {
         int knob_h = list_h * list_h / total;
         if (knob_h < 8) knob_h = 8;
@@ -1564,15 +1827,25 @@ static void hist_scroll_to_selection(int visible_h) {
     else if (bot > s_hist_scroll + visible_h) s_hist_scroll = bot - visible_h;
 }
 
-static void hist_up_click(ClickRecognizerRef rec, void *ctx) {
-    if (s_hist_sel > 0) s_hist_sel--;
-    hist_scroll_to_selection(layer_get_bounds(s_hist_list_layer).size.h - LIST_TOP);
+static void hist_down_click(ClickRecognizerRef rec, void *ctx) {
+    int list_h = layer_get_bounds(s_hist_list_layer).size.h - LIST_TOP;
+    if (s_hist_sel < s_merged_count - 1) {
+        s_hist_sel++;
+        hist_scroll_to_selection(list_h);
+    } else if (s_hist_scroll < hist_max_scroll(list_h)) {
+        s_hist_scroll = hist_max_scroll(list_h);
+    }
     layer_mark_dirty(s_hist_list_layer);
 }
 
-static void hist_down_click(ClickRecognizerRef rec, void *ctx) {
-    if (s_hist_sel < s_merged_count - 1) s_hist_sel++;
-    hist_scroll_to_selection(layer_get_bounds(s_hist_list_layer).size.h - LIST_TOP);
+static void hist_up_click(ClickRecognizerRef rec, void *ctx) {
+    int list_h = layer_get_bounds(s_hist_list_layer).size.h - LIST_TOP;
+    if (s_hist_scroll > hist_last_item_scroll(list_h)) {
+        s_hist_scroll = hist_last_item_scroll(list_h);
+    } else if (s_hist_sel > 0) {
+        s_hist_sel--;
+        hist_scroll_to_selection(list_h);
+    }
     layer_mark_dirty(s_hist_list_layer);
 }
 
@@ -1587,10 +1860,6 @@ static void hist_list_click_config(void *ctx) {
 }
 
 static void hist_start_dictation_cb(void *ctx) {
-    if (!connection_service_peek_pebble_app_connection()) {
-        set_status("Connect phone first");
-        return;
-    }
     dictation_session_start(s_dictation_session);
 }
 
@@ -1601,6 +1870,14 @@ static void hist_empty_select_click(ClickRecognizerRef rec, void *ctx) {
 
 static void hist_empty_click_config(void *ctx) {
     window_single_click_subscribe(BUTTON_ID_SELECT, hist_empty_select_click);
+}
+
+static void history_window_appear(Window *window) {
+    merged_rebuild();
+    if (s_hist_sel >= s_merged_count && s_merged_count > 0) {
+        s_hist_sel = s_merged_count - 1;
+    }
+    if (s_hist_list_layer) layer_mark_dirty(s_hist_list_layer);
 }
 
 static void history_window_load(Window *window) {
@@ -1654,15 +1931,12 @@ static void rem_detail_down_click(ClickRecognizerRef rec, void *ctx) {
 
 static void rem_detail_select_click(ClickRecognizerRef rec, void *ctx) {
     if (!s_rem_confirm) {
-        // First press: ask for confirmation
         s_rem_confirm = true;
         strncpy(s_rem_header_buf, "Delete?", sizeof(s_rem_header_buf) - 1);
+        s_rem_header_buf[sizeof(s_rem_header_buf) - 1] = '\0';
         text_layer_set_text(s_rem_detail_header, s_rem_header_buf);
-        strncpy(s_rem_hint_buf, "OK?", sizeof(s_rem_hint_buf) - 1);
-        text_layer_set_text_color(s_rem_detail_hint, C_ON_SCREEN);
-        text_layer_set_text(s_rem_detail_hint, s_rem_hint_buf);
+        layer_mark_dirty(s_rem_detail_canvas_layer);
     } else {
-        // Second press: perform delete then pop back (appear handler refreshes list)
         reminders_delete(s_rem_detail_idx);
         window_stack_pop(true);
     }
@@ -1674,6 +1948,23 @@ static void rem_detail_click_config(void *ctx) {
     window_single_click_subscribe(BUTTON_ID_SELECT, rem_detail_select_click);
 }
 
+static void rem_detail_canvas_update(Layer *layer, GContext *ctx) {
+    GRect bounds = layer_get_bounds(layer);
+    graphics_context_set_fill_color(ctx, C_SCREEN);
+    graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+    draw_action_bar(ctx, bounds);
+#ifndef PBL_ROUND
+    draw_status_clock(ctx, content_area_w(bounds));
+    draw_status_divider(ctx, bounds);
+#endif
+    int ax = action_bar_icon_x(bounds);
+    if (s_rem_confirm) {
+        draw_icon_checkmark(ctx, GPoint(ax, btn_select_y(bounds)), ACTION_ICON_COLOR);
+    } else {
+        draw_icon_trash(ctx, GPoint(ax, btn_select_y(bounds)), ACTION_ICON_COLOR);
+    }
+}
+
 static void rem_detail_window_load(Window *window) {
     Layer *root = window_get_root_layer(window);
     GRect b = layer_get_bounds(root);
@@ -1681,13 +1972,17 @@ static void rem_detail_window_load(Window *window) {
 
     window_set_background_color(window, C_SCREEN);
 
+    s_rem_detail_canvas_layer = layer_create(b);
+    layer_set_update_proc(s_rem_detail_canvas_layer, rem_detail_canvas_update);
+    layer_add_child(root, s_rem_detail_canvas_layer);
+
     strncpy(s_rem_header_buf, "NOTE", sizeof(s_rem_header_buf) - 1);
 #ifdef PBL_ROUND
     int rhdr_w = content_w - 8;
 #else
-    int rhdr_w = content_w - 56;   // leave room for the clock
+    int rhdr_w = STATUS_HDR_TITLE_W(content_w);
 #endif
-    s_rem_detail_header = text_layer_create(GRect(4, 1, rhdr_w, STATUS_H));
+    s_rem_detail_header = text_layer_create(GRect(STATUS_TITLE_X, 1, rhdr_w, STATUS_H));
     text_layer_set_background_color(s_rem_detail_header, GColorClear);
     text_layer_set_text_color(s_rem_detail_header, C_ON_SCREEN);
     text_layer_set_font(s_rem_detail_header,
@@ -1698,16 +1993,6 @@ static void rem_detail_window_load(Window *window) {
 #ifndef PBL_ROUND
     add_drill_clock(root, content_w);
 #endif
-
-    strncpy(s_rem_hint_buf, "DEL", sizeof(s_rem_hint_buf) - 1);
-    s_rem_detail_hint = text_layer_create(GRect(content_w - 40, b.size.h * 47 / 100, 36, 20));
-    text_layer_set_background_color(s_rem_detail_hint, GColorClear);
-    text_layer_set_text_color(s_rem_detail_hint, C_ON_SCREEN);
-    text_layer_set_font(s_rem_detail_hint,
-                        fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
-    text_layer_set_text_alignment(s_rem_detail_hint, GTextAlignmentRight);
-    text_layer_set_text(s_rem_detail_hint, s_rem_hint_buf);
-    layer_add_child(root, text_layer_get_layer(s_rem_detail_hint));
 
     int si = s_rem_count - 1 - s_rem_detail_idx;
     s_rem_scroll_offset = 0;
@@ -1733,8 +2018,8 @@ static void rem_detail_window_load(Window *window) {
 }
 
 static void rem_detail_window_unload(Window *window) {
-    text_layer_destroy(s_rem_detail_header);  s_rem_detail_header  = NULL;
-    text_layer_destroy(s_rem_detail_hint);    s_rem_detail_hint    = NULL;
+    layer_destroy(s_rem_detail_canvas_layer);   s_rem_detail_canvas_layer = NULL;
+    text_layer_destroy(s_rem_detail_header);    s_rem_detail_header  = NULL;
     text_layer_destroy(s_rem_detail_content); s_rem_detail_content = NULL;
     scroll_layer_destroy(s_rem_detail_scroll); s_rem_detail_scroll  = NULL;
     if (s_drill_clock_layer) { text_layer_destroy(s_drill_clock_layer); s_drill_clock_layer = NULL; }
@@ -1765,7 +2050,7 @@ static void confirm_window_push(void) {
     });
     window_stack_push(s_confirm_window, true);
     // Ask phone to classify in parallel so the target label can be shown
-    if (connection_service_peek_pebble_app_connection()) {
+    if (is_phone_connected()) {
         appmsg_classify_note(s_note_buf);
     }
 }
@@ -1794,12 +2079,14 @@ static void history_window_push(void) {
     window_set_window_handlers(s_history_window, (WindowHandlers) {
         .load   = history_window_load,
         .unload = history_window_unload,
+        .appear = history_window_appear,
     });
     window_stack_push(s_history_window, true);
 }
 
 static void detail_window_push(int idx) {
     s_detail_idx = idx;
+    s_detail_confirm = false;
     if (s_detail_window) {
         window_destroy(s_detail_window);
         s_detail_window = NULL;
@@ -1852,8 +2139,9 @@ static void debug_seed(void) {
     // doesn't suppress seeding of the other.
     if (s_history_count == 0) {
         history_save_item("Draft Q3 deck for Sarah",
-                          "Sure — quick outline:\n1. Vision\n2. Metrics\n3. The ask", DEST_AI);
-        history_save_item("Renew the domain", NULL, DEST_TODOIST);
+                          "Sure — quick outline:\n1. Vision\n2. Metrics\n3. The ask",
+                          DEST_AI, NULL);
+        history_save_item("Renew the domain", NULL, DEST_TODOIST, NULL);
     }
     if (s_rem_count == 0) {
         reminders_add("Buy oat milk");
@@ -1868,6 +2156,10 @@ static void init(void) {
     app_message_register_inbox_dropped(inbox_dropped_callback);
     app_message_register_outbox_failed(outbox_failed_callback);
     app_message_open(512, 512);
+
+    connection_service_subscribe((ConnectionHandlers) {
+        .pebble_app_connection_handler = connection_handler,
+    });
 
     // Dictation session (buffer 400 bytes)
     s_dictation_session = dictation_session_create(
@@ -1896,6 +2188,7 @@ static void init(void) {
 }
 
 static void deinit(void) {
+    connection_service_unsubscribe();
     if (s_dictation_session) {
         dictation_session_destroy(s_dictation_session);
         s_dictation_session = NULL;

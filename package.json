@@ -44,7 +44,10 @@
       "CLOCK_24H",
       "ROUTING_DONE",
       "ERROR_MSG",
-      "NOTE_IS_CLASSIFY_ONLY"
+      "NOTE_IS_CLASSIFY_ONLY",
+      "DUE_LABEL",
+      "EXTERNAL_ID",
+      "COMPLETE_TASK"
     ],
     "resources": {
       "media": [
