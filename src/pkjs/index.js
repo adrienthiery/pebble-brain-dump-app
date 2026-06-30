@@ -700,23 +700,47 @@ function sendToAI(text, isFollowup, cfg, cb) {
 // CUSTOM WEBHOOK
 // ============================================================================
 
+function buildWebhookPayload(text) {
+    return {
+        text:      text,
+        timestamp: Math.floor(Date.now() / 1000)
+    };
+}
+
+// Substitute {text}/{timestamp}/{json} placeholders in a webhook URL. Returns
+// the URL unchanged when it has no placeholders.
+function applyWebhookTemplate(url, payload) {
+    var json = encodeURIComponent(JSON.stringify(payload));
+    return url
+        .replace(/\{text\}/g, encodeURIComponent(payload.text))
+        .replace(/\{timestamp\}/g, String(payload.timestamp))
+        .replace(/\{json\}/g, json);
+}
+
+// Templated URL wins; else for GET append text/timestamp query params as before.
+function buildWebhookUrl(url, verb, payload) {
+    var templatedUrl = applyWebhookTemplate(url, payload);
+    if (templatedUrl !== url) return templatedUrl;
+    if (verb !== 'GET') return url;
+    return url + (url.indexOf('?') >= 0 ? '&' : '?') +
+        'text=' + encodeURIComponent(payload.text) +
+        '&timestamp=' + payload.timestamp;
+}
+
 function sendToWebhook(text, cfg, cb) {
     var url   = cfg.webhook_url;
     var verb  = (cfg.webhook_verb  || 'POST').toUpperCase();
     var token = cfg.webhook_token;
     if (!url) { cb(false, 'Webhook not configured'); return; }
 
-    var payload = {
-        text:      text,
-        timestamp: Math.floor(Date.now() / 1000)
-    };
+    var payload  = buildWebhookPayload(text);
+    var finalUrl = buildWebhookUrl(url, verb, payload);
 
     var xhr = new XMLHttpRequest();
     if (verb === 'GET') {
-        xhr.open('GET', url + '?text=' + encodeURIComponent(text) +
-                        '&timestamp=' + payload.timestamp);
+        xhr.open('GET', finalUrl);
     } else {
-        xhr.open(verb, url);
+        xhr.open(verb, finalUrl);
         xhr.setRequestHeader('Content-Type', 'application/json');
     }
     if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
@@ -1363,6 +1387,7 @@ Pebble.addEventListener('showConfiguration', function() {
     ' Custom Webhook</label>' +
     '<div class="fields">' +
     'URL:<input type="text" id="webhook_url" value=\'' + esc(cfg.webhook_url) + '\'>' +
+    '<p class="note">Supports URL placeholders: <code>{text}</code>, <code>{timestamp}</code>, <code>{json}</code>. AutoRemote example: <code>message=brain_dump=:={json}</code></p>' +
     'Method:<select id="webhook_verb">' +
     '<option value="POST"  ' + sel(cfg.webhook_verb,'POST')  + '>POST</option>' +
     '<option value="PUT"   ' + sel(cfg.webhook_verb,'PUT')   + '>PUT</option>' +
