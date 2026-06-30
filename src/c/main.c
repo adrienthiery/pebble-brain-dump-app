@@ -64,12 +64,11 @@
 #define STATUS_H              18
 #define STATUS_TITLE_X         4
 #define STATUS_CLOCK_W        48
-#define STATUS_CLOCK_RIGHT_PAD 3   // inset from content-area right edge
-#define STATUS_CLOCK_GAP       4   // gap between title and clock
+#define STATUS_CLOCK_RIGHT_PAD 3   // inset from screen right (no action bar)
 #define STATUS_CLOCK_X(right_x) \
     ((right_x) - STATUS_CLOCK_RIGHT_PAD - STATUS_CLOCK_W)
-#define STATUS_HDR_TITLE_W(content_w) \
-    (STATUS_CLOCK_X(content_w) - STATUS_CLOCK_GAP - STATUS_TITLE_X)
+#define STATUS_CLOCK_BAR_PAD   2
+#define STATUS_HDR_TITLE_W(content_w) ((content_w) - STATUS_TITLE_X - 4)
 #define ACTION_BAR_W   33
 #define MENU_ROW_H     54
 #define ICON_SIZE      18
@@ -162,10 +161,6 @@ static int        s_hist_row_w  = 144;
 static MergedEntry s_merged[MAX_MERGED];
 static int         s_merged_count = 0;
 
-// Shared status-bar clock TextLayer for the drill-down reading views (detail
-// and reminder-detail never coexist). Rectangular only.
-static TextLayer  *s_drill_clock_layer;
-
 // --- Detail window layers ---
 static Layer       *s_detail_canvas_layer;
 static TextLayer  *s_detail_header_layer;
@@ -221,6 +216,7 @@ static char     s_rem_header_buf[32];
 
 static void home_window_push(void);
 static void confirm_window_push(void);
+static void confirm_relayout_meta(GRect b, int content_w);
 static void response_window_push(void);
 static void history_window_push(void);
 static void detail_window_push(int idx);
@@ -266,7 +262,7 @@ static int btn_y_at(GRect bounds, int pct) {
 #ifdef PBL_ROUND
 #  define BTN_UP_PCT 38
 #else
-#  define BTN_UP_PCT 23
+#  define BTN_UP_PCT 20
 #endif
 static int btn_up_y(GRect b)     { return b.size.h * BTN_UP_PCT / 100; }
 static int btn_select_y(GRect b) { return b.size.h / 2; }
@@ -673,6 +669,13 @@ static void inbox_received_callback(DictionaryIterator *iter, void *context) {
                 snprintf(s_confirm_due_buf, sizeof(s_confirm_due_buf),
                          "due %s", due_t->value->cstring);
                 text_layer_set_text(s_confirm_due_layer, s_confirm_due_buf);
+            } else {
+                s_confirm_due_buf[0] = '\0';
+                text_layer_set_text(s_confirm_due_layer, s_confirm_due_buf);
+            }
+            if (s_confirm_window) {
+                Layer *root = window_get_root_layer(s_confirm_window);
+                confirm_relayout_meta(layer_get_bounds(root), content_area_w(layer_get_bounds(root)) - 8);
             }
         } else {
             if (dest == DEST_AI) {
@@ -818,7 +821,7 @@ static void refresh_clock_buf(void) {
     }
 }
 
-// Draw the clock right-aligned with its right edge inset from right_x.
+// Draw the clock on the dark header (full-width screens without an action bar).
 static void draw_status_clock(GContext *ctx, int right_x) {
     refresh_clock_buf();
     graphics_context_set_text_color(ctx, C_ON_SCREEN);
@@ -827,17 +830,30 @@ static void draw_status_clock(GContext *ctx, int right_x) {
         GTextOverflowModeFill, GTextAlignmentRight, NULL);
 }
 
-// Add the shared drill-view clock TextLayer to a window root.
-static void add_drill_clock(Layer *root, int right_x) {
+static GRect status_clock_bar_rect(GRect bounds) {
+    int x = action_bar_x(bounds) + STATUS_CLOCK_BAR_PAD;
+    return GRect(x, 1, bounds.size.w - x - STATUS_CLOCK_BAR_PAD, STATUS_H);
+}
+
+// Clock tucked into the action bar — black on white, flush right.
+static void draw_status_clock_on_bar(GContext *ctx, GRect bounds) {
     refresh_clock_buf();
-    s_drill_clock_layer = text_layer_create(
-        GRect(STATUS_CLOCK_X(right_x), 1, STATUS_CLOCK_W, STATUS_H));
-    text_layer_set_background_color(s_drill_clock_layer, GColorClear);
-    text_layer_set_text_color(s_drill_clock_layer, C_ON_SCREEN);
-    text_layer_set_font(s_drill_clock_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
-    text_layer_set_text_alignment(s_drill_clock_layer, GTextAlignmentRight);
-    text_layer_set_text(s_drill_clock_layer, s_clock_buf);
-    layer_add_child(root, text_layer_get_layer(s_drill_clock_layer));
+    graphics_context_set_text_color(ctx, C_ON_BAR);
+    graphics_draw_text(ctx, s_clock_buf, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
+        status_clock_bar_rect(bounds),
+        GTextOverflowModeFill, GTextAlignmentRight, NULL);
+}
+
+static void add_home_clock_layer(Layer *root, GRect bounds) {
+    refresh_clock_buf();
+    s_home_clock_layer = text_layer_create(status_clock_bar_rect(bounds));
+    text_layer_set_background_color(s_home_clock_layer, GColorClear);
+    text_layer_set_text_color(s_home_clock_layer, C_ON_BAR);
+    text_layer_set_font(s_home_clock_layer,
+                        fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
+    text_layer_set_text_alignment(s_home_clock_layer, GTextAlignmentRight);
+    text_layer_set_text(s_home_clock_layer, s_clock_buf);
+    layer_add_child(root, text_layer_get_layer(s_home_clock_layer));
 }
 #endif
 
@@ -878,29 +894,35 @@ static void draw_icon_hamburger(GContext *ctx, GPoint c, GColor color) {
     graphics_draw_line(ctx, GPoint(c.x - 7, c.y + 4), GPoint(c.x + 1, c.y + 4));
 }
 
-// Review-screen redo: clockwise arc, mirrored arrowhead, shifted 1px right.
+// Review-screen redo: clockwise arc; arrowhead at the right (start) end,
+// pointing up-left (almost horizontal) — the redo/back direction.
 static void draw_icon_redo_review(GContext *ctx, GPoint c, GColor color) {
     GPoint rc = GPoint(c.x + 1, c.y);
     graphics_context_set_stroke_color(ctx, color);
-    graphics_context_set_stroke_width(ctx, 2);
+    graphics_context_set_stroke_width(ctx, 3);
     int r = 7;
-    GRect box = GRect(rc.x - r, rc.y - r, 2 * r, 2 * r);
-    int32_t a = DEG_TO_TRIGANGLE(340);
-    graphics_draw_arc(ctx, box, GOvalScaleModeFitCircle, DEG_TO_TRIGANGLE(20), a);
+    GRect box = GRect(rc.x - r, rc.y - r, 2 * r, 2 * r + 1);
+    int32_t a_start = DEG_TO_TRIGANGLE(40);
+    int32_t a_end   = DEG_TO_TRIGANGLE(315);
+    graphics_draw_arc(ctx, box, GOvalScaleModeFitCircle, a_start, a_end);
 
-    int ca = cos_lookup(a), sa = sin_lookup(a);
-    int px = rc.x + sa * r / TRIG_MAX_RATIO;
-    int py = rc.y - ca * r / TRIG_MAX_RATIO;
+    graphics_context_set_stroke_width(ctx, 2);
+    // Pebble: 0° = 12 o'clock, angles increase clockwise.
+    // Arc runs clockwise from a_start (upper-right) to a_end (upper-left).
+    int ca = cos_lookup(a_start), sa = sin_lookup(a_start);
+    int px = rc.x + sa * r / TRIG_MAX_RATIO - 2;
+    int py = rc.y - ca * r / TRIG_MAX_RATIO - 2;
+    // Clockwise tangent; arrow points opposite (up-left at this end).
     int Tx = ca, Ty = sa;
-    int Nx = sa, Ny = -ca;    // mirrored normal (opposite side of tangent)
-    int L = 6;
-    GPoint p  = GPoint(px, py);
-    GPoint b1 = GPoint(px + (-Tx + Nx) * L / TRIG_MAX_RATIO,
-                       py + (-Ty + Ny) * L / TRIG_MAX_RATIO);
-    GPoint b2 = GPoint(px + (-Tx - Nx) * L / TRIG_MAX_RATIO,
-                       py + (-Ty - Ny) * L / TRIG_MAX_RATIO);
-    graphics_draw_line(ctx, p, b1);
-    graphics_draw_line(ctx, p, b2);
+    int Nx = -sa, Ny = ca;
+    int L = 3;
+    GPoint tip = GPoint(px, py);
+    GPoint b1 = GPoint(px + (Tx + Nx) * L / TRIG_MAX_RATIO,
+                       py + (Ty + Ny) * L / TRIG_MAX_RATIO);
+    GPoint b2 = GPoint(px + (Tx - Nx) * L / TRIG_MAX_RATIO,
+                       py + (Ty - Ny) * L / TRIG_MAX_RATIO);
+    graphics_draw_line(ctx, b1, tip);
+    graphics_draw_line(ctx, b2, tip);
 }
 
 // Send: a right-pointing arrow.
@@ -1001,6 +1023,29 @@ static void draw_dest_tile(GContext *ctx, int dest, GPoint center, int size, GCo
 // ============================================================================
 
 #define CONFIRM_HINT_W ACTION_BAR_W
+#define CONFIRM_BOTTOM_PAD 4
+#define CONFIRM_TARGET_H   18
+#define CONFIRM_DUE_H      16
+#define CONFIRM_META_GAP   2
+
+static void confirm_relayout_meta(GRect b, int content_w) {
+    if (!s_confirm_target_layer || !s_confirm_content_layer) return;
+
+    bool has_due = s_confirm_due_buf[0] != '\0';
+    int due_y = b.size.h - CONFIRM_BOTTOM_PAD - CONFIRM_DUE_H;
+    int target_y = has_due
+        ? (due_y - CONFIRM_META_GAP - CONFIRM_TARGET_H)
+        : (b.size.h - CONFIRM_BOTTOM_PAD - CONFIRM_TARGET_H);
+    int content_bottom = target_y - 4;
+
+    layer_set_frame(text_layer_get_layer(s_confirm_target_layer),
+                    GRect(4, target_y, content_w, CONFIRM_TARGET_H));
+    layer_set_frame(text_layer_get_layer(s_confirm_due_layer),
+                    GRect(4, due_y, content_w, CONFIRM_DUE_H));
+    layer_set_hidden(text_layer_get_layer(s_confirm_due_layer), !has_due);
+    layer_set_frame(text_layer_get_layer(s_confirm_content_layer),
+                    GRect(4, STATUS_H + 4, content_w, content_bottom - (STATUS_H + 4)));
+}
 
 static void confirm_canvas_update(Layer *layer, GContext *ctx) {
     GRect bounds = layer_get_bounds(layer);
@@ -1008,7 +1053,7 @@ static void confirm_canvas_update(Layer *layer, GContext *ctx) {
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
     draw_action_bar(ctx, bounds);
 #ifndef PBL_ROUND
-    draw_status_clock(ctx, content_area_w(bounds));
+    draw_status_clock_on_bar(ctx, bounds);
 #endif
     int ax = action_bar_icon_x(bounds);
     draw_icon_redo_review(ctx, GPoint(ax, btn_up_y(bounds)), ACTION_ICON_COLOR);
@@ -1063,7 +1108,7 @@ static void confirm_window_load(Window *window) {
     s_confirm_divider_layer = add_status_divider_layer(root, b.size.w);
 
     s_confirm_content_layer = text_layer_create(
-        GRect(4, STATUS_H + 4, content_w, b.size.h - STATUS_H - 46));
+        GRect(4, STATUS_H + 4, content_w, b.size.h - STATUS_H - 8));
     text_layer_set_background_color(s_confirm_content_layer, GColorClear);
     text_layer_set_text_color(s_confirm_content_layer, C_ON_SCREEN);
     text_layer_set_font(s_confirm_content_layer,
@@ -1075,7 +1120,7 @@ static void confirm_window_load(Window *window) {
     // Destination ("→ Google Tasks") + any extracted due date/time below it.
     snprintf(s_confirm_target_buf, sizeof(s_confirm_target_buf), "\xe2\x86\x92 ?");
     s_confirm_target_layer = text_layer_create(
-        GRect(4, b.size.h - 40, content_w, 18));
+        GRect(4, b.size.h - CONFIRM_BOTTOM_PAD - CONFIRM_TARGET_H, content_w, CONFIRM_TARGET_H));
     text_layer_set_background_color(s_confirm_target_layer, GColorClear);
     text_layer_set_text_color(s_confirm_target_layer, C_ON_SCREEN);
     text_layer_set_font(s_confirm_target_layer,
@@ -1085,7 +1130,7 @@ static void confirm_window_load(Window *window) {
 
     s_confirm_due_buf[0] = '\0';
     s_confirm_due_layer = text_layer_create(
-        GRect(4, b.size.h - 21, content_w, 16));
+        GRect(4, b.size.h - CONFIRM_BOTTOM_PAD - CONFIRM_DUE_H, content_w, CONFIRM_DUE_H));
     text_layer_set_background_color(s_confirm_due_layer, GColorClear);
     text_layer_set_text_color(s_confirm_due_layer, GColorLightGray);
     text_layer_set_font(s_confirm_due_layer,
@@ -1097,7 +1142,8 @@ static void confirm_window_load(Window *window) {
         snprintf(s_confirm_target_buf, sizeof(s_confirm_target_buf),
                  "\xe2\x86\x92 %s", dest_full_name(DEST_LOCAL));
         text_layer_set_text(s_confirm_target_layer, s_confirm_target_buf);
-        text_layer_set_text(s_confirm_due_layer, "");
+        s_confirm_due_buf[0] = '\0';
+        text_layer_set_text(s_confirm_due_layer, s_confirm_due_buf);
     }
 
 #ifdef DEBUG_SEED
@@ -1106,6 +1152,8 @@ static void confirm_window_load(Window *window) {
     snprintf(s_confirm_due_buf, sizeof(s_confirm_due_buf), "due Tomorrow 09:00");
     text_layer_set_text(s_confirm_due_layer, s_confirm_due_buf);
 #endif
+
+    confirm_relayout_meta(b, content_w);
 
     window_set_click_config_provider(window, confirm_click_config);
     s_confirm_open = true;
@@ -1143,6 +1191,14 @@ static void success_canvas_update(Layer *layer, GContext *ctx) {
     int w = bounds.size.w;
     int h = bounds.size.h;
 
+#if PBL_DISPLAY_HEIGHT <= 168
+    const int y_shift = 5;   // clear the status header / medallion
+    const int dumped_gap = 5; // breathing room under "DUMPED" before the tile
+#else
+    const int y_shift = 0;
+    const int dumped_gap = 0;
+#endif
+
     graphics_context_set_fill_color(ctx, C_SCREEN);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 
@@ -1164,7 +1220,7 @@ static void success_canvas_update(Layer *layer, GContext *ctx) {
 #endif
 
     // Medallion: ring + check
-    int med_cy = h * 27 / 100;
+    int med_cy = h * 27 / 100 + y_shift;
     int med_r  = 22;
     graphics_context_set_stroke_color(ctx, C_ON_SCREEN);
     graphics_context_set_stroke_width(ctx, 2);
@@ -1174,7 +1230,7 @@ static void success_canvas_update(Layer *layer, GContext *ctx) {
     // Title "DUMPED"
     graphics_context_set_text_color(ctx, C_ON_SCREEN);
     graphics_draw_text(ctx, "DUMPED", fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD),
-        GRect(0, h * 43 / 100, w, 30), GTextOverflowModeFill, GTextAlignmentCenter, NULL);
+        GRect(0, h * 43 / 100 + y_shift, w, 30), GTextOverflowModeFill, GTextAlignmentCenter, NULL);
 
     // Destination chip: bordered tile + name caps, centered as a group
     const char *name = dest_full_name(s_success_dest);
@@ -1184,7 +1240,7 @@ static void success_canvas_update(Layer *layer, GContext *ctx) {
     int tile = 20, gap = 6;
     int group_w = tile + gap + ns.w;
     int gx = (w - group_w) / 2;
-    int chip_cy = h * 62 / 100;
+    int chip_cy = h * 62 / 100 + y_shift + dumped_gap;
     draw_dest_tile(ctx, s_success_dest, GPoint(gx + tile / 2, chip_cy), tile, C_ON_SCREEN);
     graphics_context_set_text_color(ctx, C_ON_SCREEN);
     graphics_draw_text(ctx, name, chip_font,
@@ -1194,7 +1250,7 @@ static void success_canvas_update(Layer *layer, GContext *ctx) {
     // Transcript quote (dimmed, up to 2 lines)
     graphics_context_set_text_color(ctx, GColorLightGray);
     graphics_draw_text(ctx, s_success_quote, fonts_get_system_font(FONT_KEY_GOTHIC_14),
-        GRect(8, h * 72 / 100, w - 16, 40),
+        GRect(8, h * 72 / 100 + y_shift + dumped_gap, w - 16, 40),
         GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 }
 
@@ -1272,14 +1328,6 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
     int ax = action_bar_icon_x(bounds);
     draw_icon_hamburger(ctx, GPoint(ax, btn_up_y(bounds)),     ACTION_ICON_COLOR);
     draw_icon_record(ctx,    GPoint(ax, btn_select_y(bounds)), ACTION_ICON_COLOR);
-
-    if (s_waiting_response) {
-        graphics_context_set_fill_color(ctx, C_ON_SCREEN);
-        graphics_fill_circle(ctx, GPoint(content_area_w(bounds) - 6, 6), 3);
-    } else if (!is_phone_connected()) {
-        graphics_context_set_fill_color(ctx, GColorLightGray);
-        graphics_fill_circle(ctx, GPoint(content_area_w(bounds) - 6, 6), 3);
-    }
 }
 
 static void home_select_click(ClickRecognizerRef rec, void *ctx) {
@@ -1347,15 +1395,7 @@ static void home_window_load(Window *window) {
     layer_add_child(root, text_layer_get_layer(s_home_title_layer));
 
 #ifndef PBL_ROUND
-    s_home_clock_layer = text_layer_create(
-        GRect(STATUS_CLOCK_X(content_w), 1, STATUS_CLOCK_W, STATUS_H));
-    text_layer_set_background_color(s_home_clock_layer, GColorClear);
-    text_layer_set_text_color(s_home_clock_layer, C_ON_SCREEN);
-    text_layer_set_font(s_home_clock_layer,
-                        fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
-    text_layer_set_text_alignment(s_home_clock_layer, GTextAlignmentRight);
-    text_layer_set_text(s_home_clock_layer, "");
-    layer_add_child(root, text_layer_get_layer(s_home_clock_layer));
+    add_home_clock_layer(root, b);
     tick_timer_service_subscribe(MINUTE_UNIT, home_clock_tick);
     time_t now = time(NULL);
     struct tm *tick_time = localtime(&now);
@@ -1458,7 +1498,7 @@ static void resp_canvas_update(Layer *layer, GContext *ctx) {
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
     draw_action_bar(ctx, bounds);
 #ifndef PBL_ROUND
-    draw_status_clock(ctx, content_area_w(bounds));
+    draw_status_clock_on_bar(ctx, bounds);
     draw_status_divider(ctx, bounds);
 #endif
     draw_icon_reply(ctx, GPoint(action_bar_icon_x(bounds), btn_select_y(bounds)), ACTION_ICON_COLOR);
@@ -1546,7 +1586,7 @@ static void detail_down_click(ClickRecognizerRef rec, void *ctx) {
 static void detail_select_click(ClickRecognizerRef rec, void *ctx) {
     if (!s_detail_confirm) {
         s_detail_confirm = true;
-        strncpy(s_detail_header_buf, "Delete?", sizeof(s_detail_header_buf) - 1);
+        strncpy(s_detail_header_buf, "DELETE?", sizeof(s_detail_header_buf) - 1);
         s_detail_header_buf[sizeof(s_detail_header_buf) - 1] = '\0';
         text_layer_set_text(s_detail_header_layer, s_detail_header_buf);
         layer_mark_dirty(s_detail_canvas_layer);
@@ -1568,7 +1608,7 @@ static void detail_canvas_update(Layer *layer, GContext *ctx) {
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
     draw_action_bar(ctx, bounds);
 #ifndef PBL_ROUND
-    draw_status_clock(ctx, content_area_w(bounds));
+    draw_status_clock_on_bar(ctx, bounds);
     draw_status_divider(ctx, bounds);
 #endif
     int ax = action_bar_icon_x(bounds);
@@ -1606,9 +1646,6 @@ static void detail_window_load(Window *window) {
     text_layer_set_overflow_mode(s_detail_header_layer, GTextOverflowModeTrailingEllipsis);
     text_layer_set_text(s_detail_header_layer, s_detail_header_buf);
     layer_add_child(root, text_layer_get_layer(s_detail_header_layer));
-#ifndef PBL_ROUND
-    add_drill_clock(root, content_w);
-#endif
 
     s_detail_scroll_offset = 0;
     GRect scroll_frame = GRect(0, STATUS_H + 2, content_w, b.size.h - STATUS_H - 2);
@@ -1638,7 +1675,6 @@ static void detail_window_unload(Window *window) {
     text_layer_destroy(s_detail_header_layer);   s_detail_header_layer  = NULL;
     text_layer_destroy(s_detail_content_layer);  s_detail_content_layer = NULL;
     scroll_layer_destroy(s_detail_scroll_layer); s_detail_scroll_layer  = NULL;
-    if (s_drill_clock_layer) { text_layer_destroy(s_drill_clock_layer); s_drill_clock_layer = NULL; }
 }
 
 // ============================================================================
@@ -1773,9 +1809,12 @@ static void hist_list_update(Layer *layer, GContext *ctx) {
     graphics_draw_text(ctx, "HISTORY", fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
         GRect(STATUS_TITLE_X, 1, STATUS_HDR_TITLE_W(w), STATUS_H),
         GTextOverflowModeFill, GTextAlignmentLeft, NULL);
-    // Clock sits left of the action bar on the empty state, at the far edge
-    // on the full-width populated list.
-    draw_status_clock(ctx, empty ? content_area_w(bounds) : w);
+    // Clock on the action bar when empty; full-width header when populated.
+    if (empty) {
+        draw_status_clock_on_bar(ctx, bounds);
+    } else {
+        draw_status_clock(ctx, bounds.size.w);
+    }
     draw_status_divider(ctx, bounds);
 #endif
 
@@ -1932,7 +1971,7 @@ static void rem_detail_down_click(ClickRecognizerRef rec, void *ctx) {
 static void rem_detail_select_click(ClickRecognizerRef rec, void *ctx) {
     if (!s_rem_confirm) {
         s_rem_confirm = true;
-        strncpy(s_rem_header_buf, "Delete?", sizeof(s_rem_header_buf) - 1);
+        strncpy(s_rem_header_buf, "DELETE?", sizeof(s_rem_header_buf) - 1);
         s_rem_header_buf[sizeof(s_rem_header_buf) - 1] = '\0';
         text_layer_set_text(s_rem_detail_header, s_rem_header_buf);
         layer_mark_dirty(s_rem_detail_canvas_layer);
@@ -1954,7 +1993,7 @@ static void rem_detail_canvas_update(Layer *layer, GContext *ctx) {
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
     draw_action_bar(ctx, bounds);
 #ifndef PBL_ROUND
-    draw_status_clock(ctx, content_area_w(bounds));
+    draw_status_clock_on_bar(ctx, bounds);
     draw_status_divider(ctx, bounds);
 #endif
     int ax = action_bar_icon_x(bounds);
@@ -1990,9 +2029,6 @@ static void rem_detail_window_load(Window *window) {
     text_layer_set_overflow_mode(s_rem_detail_header, GTextOverflowModeTrailingEllipsis);
     text_layer_set_text(s_rem_detail_header, s_rem_header_buf);
     layer_add_child(root, text_layer_get_layer(s_rem_detail_header));
-#ifndef PBL_ROUND
-    add_drill_clock(root, content_w);
-#endif
 
     int si = s_rem_count - 1 - s_rem_detail_idx;
     s_rem_scroll_offset = 0;
@@ -2022,7 +2058,6 @@ static void rem_detail_window_unload(Window *window) {
     text_layer_destroy(s_rem_detail_header);    s_rem_detail_header  = NULL;
     text_layer_destroy(s_rem_detail_content); s_rem_detail_content = NULL;
     scroll_layer_destroy(s_rem_detail_scroll); s_rem_detail_scroll  = NULL;
-    if (s_drill_clock_layer) { text_layer_destroy(s_drill_clock_layer); s_drill_clock_layer = NULL; }
 }
 
 // ============================================================================
