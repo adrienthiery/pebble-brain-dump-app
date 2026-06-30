@@ -509,7 +509,12 @@ function sendToTasks(text, cfg, cb) {
         xhr.setRequestHeader('Content-Type', 'application/json');
         xhr.onload = function() {
             if (this.status >= 200 && this.status < 300) {
-                cb(true, 'tasks');
+                var taskId = null;
+                try {
+                    var created = JSON.parse(this.responseText);
+                    if (created && created.id) taskId = created.id;
+                } catch (e) {}
+                cb(true, taskId ? { taskId: taskId } : 'tasks');
             } else if (this.status === 401) {
                 // Token expired — try refresh
                 refreshGoogleToken(cfg, function(newToken, invalidGrant) {
@@ -532,6 +537,44 @@ function sendToTasks(text, cfg, cb) {
     }
 
     doPost(token);
+}
+
+function completeGoogleTask(taskId, cfg, cb) {
+    var token  = cfg.tasks_access_token;
+    var listId = cfg.tasks_list_id || '@default';
+    if (!token || !taskId) { cb(false, 'Google not authenticated'); return; }
+
+    function doPatch(accessToken) {
+        var xhr = new XMLHttpRequest();
+        xhr.open('PATCH', 'https://tasks.googleapis.com/tasks/v1/lists/' +
+                          encodeURIComponent(listId) + '/tasks/' +
+                          encodeURIComponent(taskId));
+        xhr.setRequestHeader('Authorization', 'Bearer ' + accessToken);
+        xhr.setRequestHeader('Content-Type', 'application/json');
+        xhr.onload = function() {
+            if (this.status >= 200 && this.status < 300) {
+                cb(true);
+            } else if (this.status === 401) {
+                refreshGoogleToken(cfg, function(newToken, invalidGrant) {
+                    if (newToken) {
+                        cfg.tasks_access_token = newToken;
+                        saveConfig(cfg);
+                        doPatch(newToken);
+                    } else {
+                        cb(false, invalidGrant
+                            ? 'Token revoked — reconnect in settings'
+                            : 'Auth error — try again');
+                    }
+                });
+            } else {
+                cb(false, 'Tasks error ' + this.status);
+            }
+        };
+        xhr.onerror = function() { cb(false, 'Network error'); };
+        xhr.send(JSON.stringify({ status: 'completed' }));
+    }
+
+    doPatch(token);
 }
 
 // ============================================================================
@@ -983,7 +1026,11 @@ function routeAndSend(text, isFollowup) {
         if (dest === 'ai') {
             sendToWatch({ AI_RESPONSE: data, AI_RESPONSE_DONE: 1, DEST_USED: di });
         } else {
-            sendToWatch({ CONFIRM: 1, DEST_USED: di });
+            var msg = { CONFIRM: 1, DEST_USED: di };
+            if (data && typeof data === 'object' && data.taskId) {
+                msg.EXTERNAL_ID = data.taskId;
+            }
+            sendToWatch(msg);
         }
     }
 
@@ -999,11 +1046,41 @@ function routeAndSend(text, isFollowup) {
     }
 }
 
-function sendToWatch(msg) {
+// AppMessage allows only one message in flight; a second sendAppMessage before
+// the first acks fails with APP_MSG_BUSY and is dropped. Several call sites fire
+// two messages in the same tick (e.g. ROUTING_DONE then CONFIRM for a local
+// note), so serialize: enqueue, and send the next only after the prior ack/nack.
+var s_outbox_queue = [];
+var s_outbox_busy  = false;
+
+function flushOutbox() {
+    if (s_outbox_busy || s_outbox_queue.length === 0) return;
+    s_outbox_busy = true;
+    var msg = s_outbox_queue.shift();
     Pebble.sendAppMessage(msg,
-        function()  { console.log('→ watch: ' + JSON.stringify(msg)); },
-        function(e) { console.log('✗ watch: ' + JSON.stringify(e));   }
+        function()  { console.log('→ watch: ' + JSON.stringify(msg)); s_outbox_busy = false; flushOutbox(); },
+        function(e) { console.log('✗ watch: ' + JSON.stringify(e));   s_outbox_busy = false; flushOutbox(); }
     );
+}
+
+function sendToWatch(msg) {
+    s_outbox_queue.push(msg);
+    flushOutbox();
+}
+
+// Bitmask of enabled destinations, sent to the watch so it can show the right
+// status. Bit positions must match the C side. Single source of truth — both
+// the ready handler and the config-save handler use this.
+function computeDestMask(cfg) {
+    var enabled = getEnabledDests(cfg);
+    var mask = 0;
+    if (enabled.indexOf('tasks')     >= 0) mask |= 1;
+    if (enabled.indexOf('notion')    >= 0) mask |= 2;
+    if (enabled.indexOf('ai')        >= 0) mask |= 4;
+    if (enabled.indexOf('webhook')   >= 0) mask |= 8;
+    if (enabled.indexOf('todoist')   >= 0) mask |= 32;
+    if (enabled.indexOf('nextcloud') >= 0) mask |= 64;
+    return mask;
 }
 
 // ============================================================================
@@ -1013,15 +1090,7 @@ function sendToWatch(msg) {
 Pebble.addEventListener('ready', function() {
     console.log('Brain Dump JS ready');
     var cfg     = getConfig();
-    var enabled = getEnabledDests(cfg);
-    var mask = 0;
-    if (enabled.indexOf('tasks')     >= 0) mask |= 1;
-    if (enabled.indexOf('notion')    >= 0) mask |= 2;
-    if (enabled.indexOf('ai')        >= 0) mask |= 4;
-    if (enabled.indexOf('webhook')   >= 0) mask |= 8;
-    if (enabled.indexOf('todoist')   >= 0) mask |= 32;
-    if (enabled.indexOf('nextcloud') >= 0) mask |= 64;
-    sendToWatch({ DEST_MASK: mask });
+    sendToWatch({ DEST_MASK: computeDestMask(cfg) });
 
     // Proactively refresh Google access token so it's always fresh before use.
     // Access tokens expire after 1 hour; refreshing on every connect keeps them valid.
@@ -1037,6 +1106,31 @@ Pebble.addEventListener('ready', function() {
         });
     }
 });
+
+// Short human label for any due date/time extracted from the note, e.g.
+// "Tomorrow 09:00", "Mon 7", "18:00". Empty string if none found.
+function formatDueLabel(text) {
+    var iso = extractDueDate(text);
+    var tm  = extractTime(text);
+    if (!iso && !tm) return '';
+    var parts = [];
+    if (iso) {
+        var dp = iso.substring(0, 10).split('-');
+        var d  = new Date(parseInt(dp[0], 10), parseInt(dp[1], 10) - 1, parseInt(dp[2], 10));
+        var now = new Date();
+        var t0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        var diff = Math.round((d - t0) / 86400000);
+        var days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+        if (diff === 0) parts.push('Today');
+        else if (diff === 1) parts.push('Tomorrow');
+        else parts.push(days[d.getDay()] + ' ' + d.getDate());
+    }
+    if (tm) {
+        function pad(n) { return n < 10 ? '0' + n : '' + n; }
+        parts.push(pad(tm.h) + ':' + pad(tm.m));
+    }
+    return parts.join(' ');
+}
 
 Pebble.addEventListener('appmessage', function(e) {
     var p = e.payload;
@@ -1058,7 +1152,13 @@ Pebble.addEventListener('appmessage', function(e) {
                 else if (enabled2.indexOf('todoist') >= 0) dest2 = 'todoist';
                 else dest2 = 'local';
             }
-            sendToWatch({ ROUTING_DONE: DEST_INDEX[dest2] !== undefined ? DEST_INDEX[dest2] : 4 });
+            var msg2 = { ROUTING_DONE: DEST_INDEX[dest2] !== undefined ? DEST_INDEX[dest2] : 4 };
+            // Surface an extracted due date/time for task destinations.
+            if (dest2 === 'tasks' || dest2 === 'todoist') {
+                var due = formatDueLabel(p.NOTE_TEXT);
+                if (due) msg2.DUE_LABEL = due;
+            }
+            sendToWatch(msg2);
         } else {
             routeAndSend(p.NOTE_TEXT, p.NOTE_IS_FOLLOWUP === 1);
         }
@@ -1067,6 +1167,12 @@ Pebble.addEventListener('appmessage', function(e) {
     if (p.CLEAR_CONTEXT) {
         s_ai_messages = [];
         console.log('AI context cleared');
+    }
+
+    if (p.COMPLETE_TASK && p.EXTERNAL_ID) {
+        completeGoogleTask(p.EXTERNAL_ID, getConfig(), function(ok, err) {
+            console.log(ok ? 'Google Task completed' : ('Complete failed: ' + err));
+        });
     }
 });
 
@@ -1464,14 +1570,8 @@ Pebble.addEventListener('webviewclosed', function(e) {
         var cfg = JSON.parse(decodeURIComponent(e.response));
         saveConfig(cfg);
         console.log('Config saved, dest mask recalculated');
-        // Re-send DEST_MASK to watch
-        var enabled = getEnabledDests(cfg);
-        var mask = 0;
-        if (enabled.indexOf('tasks')   >= 0) mask |= 1;
-        if (enabled.indexOf('notion')  >= 0) mask |= 2;
-        if (enabled.indexOf('ai')      >= 0) mask |= 4;
-        if (enabled.indexOf('webhook') >= 0) mask |= 8;
-        sendToWatch({ DEST_MASK: mask });
+        // Re-send DEST_MASK to watch (now includes todoist + nextcloud)
+        sendToWatch({ DEST_MASK: computeDestMask(cfg) });
     } catch(e2) {
         console.log('Config parse error: ' + e2);
     }

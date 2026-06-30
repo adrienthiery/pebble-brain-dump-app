@@ -1,7 +1,7 @@
 {
   "name": "brain-dump",
   "author": "Adrien THIERY",
-  "version": "1.0.15",
+  "version": "2.1.0",
   "keywords": [
     "pebble-app"
   ],
@@ -44,7 +44,10 @@
       "CLOCK_24H",
       "ROUTING_DONE",
       "ERROR_MSG",
-      "NOTE_IS_CLASSIFY_ONLY"
+      "NOTE_IS_CLASSIFY_ONLY",
+      "DUE_LABEL",
+      "EXTERNAL_ID",
+      "COMPLETE_TASK"
     ],
     "resources": {
       "media": [
@@ -53,6 +56,11 @@
           "name": "MENU_ICON",
           "file": "images/menu_icon.png",
           "menuIcon": true
+        },
+        {
+          "type": "bitmap",
+          "name": "IMG_BRAIN_MIC",
+          "file": "images/brain_mic.png"
         }
       ]
     }
