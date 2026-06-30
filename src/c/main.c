@@ -61,7 +61,8 @@
 #define C_ON_BAR   GColorBlack
 
 // Layout chrome (Time 2 handoff spec)
-#define STATUS_H              18
+// STATUS_H / MENU_ROW_H grow with the OS Text Size pref (see status_h/menu_row_h).
+#define STATUS_H              (status_h())
 #define STATUS_TITLE_X         4
 #define STATUS_CLOCK_W        48
 #define STATUS_CLOCK_RIGHT_PAD 3   // inset from screen right (no action bar)
@@ -70,7 +71,7 @@
 #define STATUS_CLOCK_BAR_PAD   2
 #define STATUS_HDR_TITLE_W(content_w) ((content_w) - STATUS_TITLE_X - 4)
 #define ACTION_BAR_W   33
-#define MENU_ROW_H     54
+#define MENU_ROW_H     (menu_row_h())
 #define ICON_SIZE      18
 #define MENU_TILE_SIZE 28
 #define MAX_MERGED     (MAX_HISTORY + MAX_REMINDERS)
@@ -210,6 +211,9 @@ static bool     s_rem_confirm    = false;
 static int16_t  s_rem_scroll_offset = 0;
 static char     s_rem_header_buf[32];
 
+// --- Accessibility: cached OS "Text Size" preference (sampled once in init) ---
+static PreferredContentSize s_csize = PreferredContentSizeMedium;
+
 // ============================================================================
 // FORWARD DECLARATIONS
 // ============================================================================
@@ -227,6 +231,69 @@ static void success_window_push(int dest);
 // ============================================================================
 // HELPERS
 // ============================================================================
+
+// ----------------------------------------------------------------------------
+// Content-size-aware fonts
+//
+// Pebble exposes the user's system-wide "Text Size" (Settings > Notifications >
+// Text Size) via preferred_content_size(). The native UI scales its fonts across
+// four tiers; we mirror that table (firmware shell/system_theme.c) so our chrome
+// tracks the OS setting. s_csize is sampled once in init() — the pref only changes
+// from the system Settings app, which kills us first, so a fresh launch re-reads it.
+// ----------------------------------------------------------------------------
+typedef enum {
+    AF_STATUS = 0,   // status-bar text (clock, screen title) — capped to bar height
+    AF_HEADER,       // bold label / list-row title
+    AF_TITLE,        // prominent title (hero, DUMPED, empty state)
+    AF_BODY,         // long-form reading content (scrollable)
+    AF_FOOTER,       // meta / footnote / due / quote
+    AF_COUNT
+} AppFont;
+
+// key = system font key; h = nominal line height in px (used to size frames).
+typedef struct { const char *key; int16_t h; } AppFontSpec;
+
+static const AppFontSpec s_app_fonts[NumPreferredContentSizes][AF_COUNT] = {
+    [PreferredContentSizeSmall] = {
+        [AF_STATUS] = { FONT_KEY_GOTHIC_14_BOLD, 16 },
+        [AF_HEADER] = { FONT_KEY_GOTHIC_18_BOLD, 21 },
+        [AF_TITLE]  = { FONT_KEY_GOTHIC_18_BOLD, 21 },
+        [AF_BODY]   = { FONT_KEY_GOTHIC_18,      21 },
+        [AF_FOOTER] = { FONT_KEY_GOTHIC_14,      16 },
+    },
+    [PreferredContentSizeMedium] = {
+        [AF_STATUS] = { FONT_KEY_GOTHIC_14_BOLD, 16 },
+        [AF_HEADER] = { FONT_KEY_GOTHIC_18_BOLD, 21 },
+        [AF_TITLE]  = { FONT_KEY_GOTHIC_24_BOLD, 28 },
+        [AF_BODY]   = { FONT_KEY_GOTHIC_24_BOLD, 28 },
+        [AF_FOOTER] = { FONT_KEY_GOTHIC_18,      21 },
+    },
+    [PreferredContentSizeLarge] = {
+        [AF_STATUS] = { FONT_KEY_GOTHIC_18_BOLD, 21 },
+        [AF_HEADER] = { FONT_KEY_GOTHIC_24_BOLD, 28 },
+        [AF_TITLE]  = { FONT_KEY_GOTHIC_28_BOLD, 33 },
+        [AF_BODY]   = { FONT_KEY_GOTHIC_28,      33 },
+        [AF_FOOTER] = { FONT_KEY_GOTHIC_18,      21 },
+    },
+    [PreferredContentSizeExtraLarge] = {
+        // No GOTHIC_36 system font key in the app SDK (firmware-only), so XL
+        // Title/Body cap at 28 — still a clear step up from the Large tier's body.
+        [AF_STATUS] = { FONT_KEY_GOTHIC_18_BOLD, 21 },
+        [AF_HEADER] = { FONT_KEY_GOTHIC_28_BOLD, 33 },
+        [AF_TITLE]  = { FONT_KEY_GOTHIC_28_BOLD, 33 },
+        [AF_BODY]   = { FONT_KEY_GOTHIC_28,      33 },
+        [AF_FOOTER] = { FONT_KEY_GOTHIC_24,      28 },
+    },
+};
+
+static const char *app_font_key(AppFont f) { return s_app_fonts[s_csize][f].key; }
+static GFont app_font(AppFont f)           { return fonts_get_system_font(app_font_key(f)); }
+static int  app_font_h(AppFont f)          { return s_app_fonts[s_csize][f].h; }
+
+// Status bar grows so the (scaled) clock + title still fit: 18px at S/M, 23 at L/XL.
+static int status_h(void)   { return app_font_h(AF_STATUS) + 2; }
+// History row grows to hold a scaled title (HEADER) + meta line (FOOTER).
+static int menu_row_h(void) { return app_font_h(AF_HEADER) + app_font_h(AF_FOOTER) + 14; }
 
 // Full product name for a destination — used in every user-facing label.
 static const char *dest_full_name(int dest) {
@@ -825,6 +892,7 @@ static void refresh_clock_buf(void) {
 static void draw_status_clock(GContext *ctx, int right_x) {
     refresh_clock_buf();
     graphics_context_set_text_color(ctx, C_ON_SCREEN);
+    // Clock stays compact (14_BOLD) at all tiers — it lives in a fixed-width strip.
     graphics_draw_text(ctx, s_clock_buf, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
         GRect(STATUS_CLOCK_X(right_x), 1, STATUS_CLOCK_W, STATUS_H),
         GTextOverflowModeFill, GTextAlignmentRight, NULL);
@@ -849,8 +917,7 @@ static void add_home_clock_layer(Layer *root, GRect bounds) {
     s_home_clock_layer = text_layer_create(status_clock_bar_rect(bounds));
     text_layer_set_background_color(s_home_clock_layer, GColorClear);
     text_layer_set_text_color(s_home_clock_layer, C_ON_BAR);
-    text_layer_set_font(s_home_clock_layer,
-                        fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
+    text_layer_set_font(s_home_clock_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
     text_layer_set_text_alignment(s_home_clock_layer, GTextAlignmentRight);
     text_layer_set_text(s_home_clock_layer, s_clock_buf);
     layer_add_child(root, text_layer_get_layer(s_home_clock_layer));
@@ -1024,8 +1091,8 @@ static void draw_dest_tile(GContext *ctx, int dest, GPoint center, int size, GCo
 
 #define CONFIRM_HINT_W ACTION_BAR_W
 #define CONFIRM_BOTTOM_PAD 4
-#define CONFIRM_TARGET_H   18
-#define CONFIRM_DUE_H      16
+#define CONFIRM_TARGET_H   (app_font_h(AF_HEADER))
+#define CONFIRM_DUE_H      (app_font_h(AF_FOOTER))
 #define CONFIRM_META_GAP   2
 
 static void confirm_relayout_meta(GRect b, int content_w) {
@@ -1100,8 +1167,7 @@ static void confirm_window_load(Window *window) {
         GRect(STATUS_TITLE_X, 1, STATUS_HDR_TITLE_W(content_area_w(b)), STATUS_H));
     text_layer_set_background_color(s_confirm_title_layer, GColorClear);
     text_layer_set_text_color(s_confirm_title_layer, C_ON_SCREEN);
-    text_layer_set_font(s_confirm_title_layer,
-                        fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
+    text_layer_set_font(s_confirm_title_layer, app_font(AF_STATUS));
     text_layer_set_text(s_confirm_title_layer, "REVIEW");
     layer_add_child(root, text_layer_get_layer(s_confirm_title_layer));
 
@@ -1111,8 +1177,7 @@ static void confirm_window_load(Window *window) {
         GRect(4, STATUS_H + 4, content_w, b.size.h - STATUS_H - 8));
     text_layer_set_background_color(s_confirm_content_layer, GColorClear);
     text_layer_set_text_color(s_confirm_content_layer, C_ON_SCREEN);
-    text_layer_set_font(s_confirm_content_layer,
-                        fonts_get_system_font(FONT_KEY_GOTHIC_18));
+    text_layer_set_font(s_confirm_content_layer, app_font(AF_BODY));
     text_layer_set_overflow_mode(s_confirm_content_layer, GTextOverflowModeWordWrap);
     text_layer_set_text(s_confirm_content_layer, s_note_buf);
     layer_add_child(root, text_layer_get_layer(s_confirm_content_layer));
@@ -1123,8 +1188,7 @@ static void confirm_window_load(Window *window) {
         GRect(4, b.size.h - CONFIRM_BOTTOM_PAD - CONFIRM_TARGET_H, content_w, CONFIRM_TARGET_H));
     text_layer_set_background_color(s_confirm_target_layer, GColorClear);
     text_layer_set_text_color(s_confirm_target_layer, C_ON_SCREEN);
-    text_layer_set_font(s_confirm_target_layer,
-                        fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
+    text_layer_set_font(s_confirm_target_layer, app_font(AF_HEADER));
     text_layer_set_text(s_confirm_target_layer, s_confirm_target_buf);
     layer_add_child(root, text_layer_get_layer(s_confirm_target_layer));
 
@@ -1133,8 +1197,7 @@ static void confirm_window_load(Window *window) {
         GRect(4, b.size.h - CONFIRM_BOTTOM_PAD - CONFIRM_DUE_H, content_w, CONFIRM_DUE_H));
     text_layer_set_background_color(s_confirm_due_layer, GColorClear);
     text_layer_set_text_color(s_confirm_due_layer, GColorLightGray);
-    text_layer_set_font(s_confirm_due_layer,
-                        fonts_get_system_font(FONT_KEY_GOTHIC_14));
+    text_layer_set_font(s_confirm_due_layer, app_font(AF_FOOTER));
     text_layer_set_text(s_confirm_due_layer, s_confirm_due_buf);
     layer_add_child(root, text_layer_get_layer(s_confirm_due_layer));
 
@@ -1205,10 +1268,10 @@ static void success_canvas_update(Layer *layer, GContext *ctx) {
     // Status bar: round centers the title alone; rect shows title + clock.
     graphics_context_set_text_color(ctx, GColorLightGray);
 #ifdef PBL_ROUND
-    graphics_draw_text(ctx, "SAVED", fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
+    graphics_draw_text(ctx, "SAVED", app_font(AF_STATUS),
         GRect(0, 1, w, STATUS_H), GTextOverflowModeFill, GTextAlignmentCenter, NULL);
 #else
-    graphics_draw_text(ctx, "SAVED", fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
+    graphics_draw_text(ctx, "SAVED", app_font(AF_STATUS),
         GRect(STATUS_TITLE_X, 1, STATUS_HDR_TITLE_W(w), STATUS_H),
         GTextOverflowModeFill, GTextAlignmentLeft, NULL);
     graphics_context_set_text_color(ctx, C_ON_SCREEN);
@@ -1229,14 +1292,16 @@ static void success_canvas_update(Layer *layer, GContext *ctx) {
 
     // Title "DUMPED"
     graphics_context_set_text_color(ctx, C_ON_SCREEN);
-    graphics_draw_text(ctx, "DUMPED", fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD),
-        GRect(0, h * 43 / 100 + y_shift, w, 30), GTextOverflowModeFill, GTextAlignmentCenter, NULL);
+    graphics_draw_text(ctx, "DUMPED", app_font(AF_TITLE),
+        GRect(0, h * 43 / 100 + y_shift, w, app_font_h(AF_TITLE) + 6),
+        GTextOverflowModeFill, GTextAlignmentCenter, NULL);
 
     // Destination chip: bordered tile + name caps, centered as a group
     const char *name = dest_full_name(s_success_dest);
-    GFont chip_font = fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD);
+    GFont chip_font = app_font(AF_STATUS);
+    int chip_h = app_font_h(AF_STATUS);
     GSize ns = graphics_text_layout_get_content_size(name, chip_font,
-        GRect(0, 0, w, 20), GTextOverflowModeFill, GTextAlignmentLeft);
+        GRect(0, 0, w, chip_h), GTextOverflowModeFill, GTextAlignmentLeft);
     int tile = 20, gap = 6;
     int group_w = tile + gap + ns.w;
     int gx = (w - group_w) / 2;
@@ -1244,12 +1309,12 @@ static void success_canvas_update(Layer *layer, GContext *ctx) {
     draw_dest_tile(ctx, s_success_dest, GPoint(gx + tile / 2, chip_cy), tile, C_ON_SCREEN);
     graphics_context_set_text_color(ctx, C_ON_SCREEN);
     graphics_draw_text(ctx, name, chip_font,
-        GRect(gx + tile + gap, chip_cy - 10, ns.w + 4, 20),
+        GRect(gx + tile + gap, chip_cy - chip_h / 2, ns.w + 4, chip_h),
         GTextOverflowModeFill, GTextAlignmentLeft, NULL);
 
     // Transcript quote (dimmed, up to 2 lines)
     graphics_context_set_text_color(ctx, GColorLightGray);
-    graphics_draw_text(ctx, s_success_quote, fonts_get_system_font(FONT_KEY_GOTHIC_14),
+    graphics_draw_text(ctx, s_success_quote, app_font(AF_FOOTER),
         GRect(8, h * 72 / 100 + y_shift + dumped_gap, w - 16, 40),
         GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 }
@@ -1389,8 +1454,7 @@ static void home_window_load(Window *window) {
 #endif
     text_layer_set_background_color(s_home_title_layer, GColorClear);
     text_layer_set_text_color(s_home_title_layer, GColorLightGray);
-    text_layer_set_font(s_home_title_layer,
-                        fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
+    text_layer_set_font(s_home_title_layer, app_font(AF_STATUS));
     text_layer_set_text(s_home_title_layer, "DUMP");
     layer_add_child(root, text_layer_get_layer(s_home_title_layer));
 
@@ -1408,20 +1472,19 @@ static void home_window_load(Window *window) {
 #else
     int text_w = content_w;
 #endif
-    s_hero_layer = text_layer_create(GRect(0, hero_y, text_w, 30));
+    int hero_h = app_font_h(AF_TITLE) + 4;
+    s_hero_layer = text_layer_create(GRect(0, hero_y, text_w, hero_h));
     text_layer_set_background_color(s_hero_layer, GColorClear);
     text_layer_set_text_color(s_hero_layer, C_ON_SCREEN);
-    text_layer_set_font(s_hero_layer,
-                        fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
+    text_layer_set_font(s_hero_layer, app_font(AF_TITLE));
     text_layer_set_text_alignment(s_hero_layer, GTextAlignmentCenter);
     text_layer_set_text(s_hero_layer, "READY");
     layer_add_child(root, text_layer_get_layer(s_hero_layer));
 
-    s_meta_layer = text_layer_create(GRect(0, hero_y + 28, text_w, 20));
+    s_meta_layer = text_layer_create(GRect(0, hero_y + hero_h, text_w, app_font_h(AF_FOOTER) + 4));
     text_layer_set_background_color(s_meta_layer, GColorClear);
     text_layer_set_text_color(s_meta_layer, GColorLightGray);
-    text_layer_set_font(s_meta_layer,
-                        fonts_get_system_font(FONT_KEY_GOTHIC_14));
+    text_layer_set_font(s_meta_layer, app_font(AF_FOOTER));
     text_layer_set_text_alignment(s_meta_layer, GTextAlignmentCenter);
     text_layer_set_text(s_meta_layer, "PRESS TO SPEAK");
     layer_add_child(root, text_layer_get_layer(s_meta_layer));
@@ -1519,8 +1582,7 @@ static void response_window_load(Window *window) {
         GRect(STATUS_TITLE_X, 1, STATUS_HDR_TITLE_W(content_w), STATUS_H));
     text_layer_set_background_color(s_resp_header_layer, GColorClear);
     text_layer_set_text_color(s_resp_header_layer, C_ON_SCREEN);
-    text_layer_set_font(s_resp_header_layer,
-                        fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
+    text_layer_set_font(s_resp_header_layer, app_font(AF_STATUS));
     text_layer_set_overflow_mode(s_resp_header_layer, GTextOverflowModeTrailingEllipsis);
     text_layer_set_text(s_resp_header_layer, "AI");
     layer_add_child(root, text_layer_get_layer(s_resp_header_layer));
@@ -1537,8 +1599,7 @@ static void response_window_load(Window *window) {
     s_resp_content_layer = text_layer_create(GRect(4, 4, content_w_inner, 2000));
     text_layer_set_background_color(s_resp_content_layer, GColorClear);
     text_layer_set_text_color(s_resp_content_layer, C_ON_SCREEN);
-    text_layer_set_font(s_resp_content_layer,
-                        fonts_get_system_font(FONT_KEY_GOTHIC_24));
+    text_layer_set_font(s_resp_content_layer, app_font(AF_BODY));
     text_layer_set_overflow_mode(s_resp_content_layer, GTextOverflowModeWordWrap);
     text_layer_set_text(s_resp_content_layer, s_conversation_buf);
     scroll_layer_add_child(s_resp_scroll_layer,
@@ -1641,8 +1702,7 @@ static void detail_window_load(Window *window) {
     s_detail_header_layer = text_layer_create(GRect(STATUS_TITLE_X, 1, hdr_w, STATUS_H));
     text_layer_set_background_color(s_detail_header_layer, GColorClear);
     text_layer_set_text_color(s_detail_header_layer, C_ON_SCREEN);
-    text_layer_set_font(s_detail_header_layer,
-                        fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
+    text_layer_set_font(s_detail_header_layer, app_font(AF_STATUS));
     text_layer_set_overflow_mode(s_detail_header_layer, GTextOverflowModeTrailingEllipsis);
     text_layer_set_text(s_detail_header_layer, s_detail_header_buf);
     layer_add_child(root, text_layer_get_layer(s_detail_header_layer));
@@ -1656,8 +1716,7 @@ static void detail_window_load(Window *window) {
     s_detail_content_layer = text_layer_create(GRect(4, 4, inner_w, 2000));
     text_layer_set_background_color(s_detail_content_layer, GColorClear);
     text_layer_set_text_color(s_detail_content_layer, C_ON_SCREEN);
-    text_layer_set_font(s_detail_content_layer,
-                        fonts_get_system_font(FONT_KEY_GOTHIC_24));
+    text_layer_set_font(s_detail_content_layer, app_font(AF_BODY));
     text_layer_set_overflow_mode(s_detail_content_layer, GTextOverflowModeWordWrap);
     text_layer_set_text(s_detail_content_layer, s_history_full[s_detail_idx]);
     scroll_layer_add_child(s_detail_scroll_layer,
@@ -1747,8 +1806,8 @@ static int hist_last_item_scroll(int list_h) {
 
 static void draw_hist_footer_row(GContext *ctx, int y, int w) {
     graphics_context_set_text_color(ctx, GColorLightGray);
-    graphics_draw_text(ctx, "NO MORE ENTRIES", fonts_get_system_font(FONT_KEY_GOTHIC_14),
-        GRect(0, y + 18, w, 20), GTextOverflowModeFill, GTextAlignmentCenter, NULL);
+    graphics_draw_text(ctx, "NO MORE ENTRIES", app_font(AF_FOOTER),
+        GRect(0, y + 18, w, app_font_h(AF_FOOTER) + 4), GTextOverflowModeFill, GTextAlignmentCenter, NULL);
 }
 
 // Draw one merged row at top-left (0,y) within width w.
@@ -1764,13 +1823,17 @@ static void draw_merged_row(GContext *ctx, const MergedEntry *e, int y, int w, b
 
     int text_x = tile_cx + MENU_TILE_SIZE / 2 + 8;
     int text_w = w - text_x - 4;
+    int th = app_font_h(AF_HEADER);
+    int mh = app_font_h(AF_FOOTER);
+    int pad = (MENU_ROW_H - th - mh) / 2;
+    if (pad < 2) pad = 2;
     graphics_context_set_text_color(ctx, fg);
-    graphics_draw_text(ctx, e->title, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
-        GRect(text_x, y + 6, text_w, 22),
+    graphics_draw_text(ctx, e->title, app_font(AF_HEADER),
+        GRect(text_x, y + pad, text_w, th + 2),
         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
     graphics_context_set_text_color(ctx, meta_fg);
-    graphics_draw_text(ctx, e->meta, fonts_get_system_font(FONT_KEY_GOTHIC_14),
-        GRect(text_x, y + 27, text_w, 16),
+    graphics_draw_text(ctx, e->meta, app_font(AF_FOOTER),
+        GRect(text_x, y + pad + th, text_w, mh + 2),
         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
     // Row divider (skip under a selected/inverted row)
@@ -1803,10 +1866,10 @@ static void hist_list_update(Layer *layer, GContext *ctx) {
     // Status title "HISTORY"
     graphics_context_set_text_color(ctx, C_ON_SCREEN);
 #ifdef PBL_ROUND
-    graphics_draw_text(ctx, "HISTORY", fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
+    graphics_draw_text(ctx, "HISTORY", app_font(AF_STATUS),
         GRect(0, LIST_TOP - 20, w, STATUS_H), GTextOverflowModeFill, GTextAlignmentCenter, NULL);
 #else
-    graphics_draw_text(ctx, "HISTORY", fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
+    graphics_draw_text(ctx, "HISTORY", app_font(AF_STATUS),
         GRect(STATUS_TITLE_X, 1, STATUS_HDR_TITLE_W(w), STATUS_H),
         GTextOverflowModeFill, GTextAlignmentLeft, NULL);
     // Clock on the action bar when empty; full-width header when populated.
@@ -1828,11 +1891,11 @@ static void hist_list_update(Layer *layer, GContext *ctx) {
         int tw = content_area_w(bounds);  // center in the area left of the bar
 #endif
         graphics_context_set_text_color(ctx, C_ON_SCREEN);
-        graphics_draw_text(ctx, "NO ENTRIES", fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD),
-            GRect(0, h / 2 - 22, tw, 36), GTextOverflowModeFill, GTextAlignmentCenter, NULL);
+        graphics_draw_text(ctx, "NO ENTRIES", app_font(AF_TITLE),
+            GRect(0, h / 2 - 22, tw, app_font_h(AF_TITLE) + 8), GTextOverflowModeFill, GTextAlignmentCenter, NULL);
         graphics_context_set_text_color(ctx, GColorLightGray);
-        graphics_draw_text(ctx, "PRESS TO SPEAK", fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
-            GRect(0, h / 2 + 16, tw, 20), GTextOverflowModeFill, GTextAlignmentCenter, NULL);
+        graphics_draw_text(ctx, "PRESS TO SPEAK", app_font(AF_STATUS),
+            GRect(0, h / 2 + 16, tw, app_font_h(AF_STATUS) + 4), GTextOverflowModeFill, GTextAlignmentCenter, NULL);
         return;
     }
 
@@ -2024,8 +2087,7 @@ static void rem_detail_window_load(Window *window) {
     s_rem_detail_header = text_layer_create(GRect(STATUS_TITLE_X, 1, rhdr_w, STATUS_H));
     text_layer_set_background_color(s_rem_detail_header, GColorClear);
     text_layer_set_text_color(s_rem_detail_header, C_ON_SCREEN);
-    text_layer_set_font(s_rem_detail_header,
-                        fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
+    text_layer_set_font(s_rem_detail_header, app_font(AF_STATUS));
     text_layer_set_overflow_mode(s_rem_detail_header, GTextOverflowModeTrailingEllipsis);
     text_layer_set_text(s_rem_detail_header, s_rem_header_buf);
     layer_add_child(root, text_layer_get_layer(s_rem_detail_header));
@@ -2040,8 +2102,7 @@ static void rem_detail_window_load(Window *window) {
     s_rem_detail_content = text_layer_create(GRect(4, 4, inner_w, 2000));
     text_layer_set_background_color(s_rem_detail_content, GColorClear);
     text_layer_set_text_color(s_rem_detail_content, C_ON_SCREEN);
-    text_layer_set_font(s_rem_detail_content,
-                        fonts_get_system_font(FONT_KEY_GOTHIC_24));
+    text_layer_set_font(s_rem_detail_content, app_font(AF_BODY));
     text_layer_set_overflow_mode(s_rem_detail_content, GTextOverflowModeWordWrap);
     text_layer_set_text(s_rem_detail_content, s_rem_text[si]);
     scroll_layer_add_child(s_rem_detail_scroll,
@@ -2186,6 +2247,9 @@ static void debug_seed(void) {
 #endif
 
 static void init(void) {
+    // Sample the OS "Text Size" pref so all chrome scales to match the native UI.
+    s_csize = preferred_content_size();
+
     // AppMessage — register before open
     app_message_register_inbox_received(inbox_received_callback);
     app_message_register_inbox_dropped(inbox_dropped_callback);
