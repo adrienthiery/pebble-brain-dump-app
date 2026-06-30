@@ -47,7 +47,8 @@
       "NOTE_IS_CLASSIFY_ONLY",
       "DUE_LABEL",
       "EXTERNAL_ID",
-      "COMPLETE_TASK"
+      "COMPLETE_TASK",
+      "WEBHOOK_MSG"
     ],
     "resources": {
       "media": [

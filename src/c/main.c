@@ -45,6 +45,7 @@
 #define DEST_LOCAL   4   // on-watch reminders list (no phone needed)
 #define DEST_TODOIST    5
 #define DEST_NEXTCLOUD  6
+#define DEST_NEXTCLOUD_TASKS 7
 
 // Destination bitmask bits (must match pkjs DEST_MASK)
 #define DEST_BIT_TASKS     (1 << DEST_TASKS)
@@ -53,6 +54,7 @@
 #define DEST_BIT_WEBHOOK   (1 << DEST_WEBHOOK)
 #define DEST_BIT_TODOIST   (1 << DEST_TODOIST)
 #define DEST_BIT_NEXTCLOUD (1 << DEST_NEXTCLOUD)
+#define DEST_BIT_NEXTCLOUD_TASKS (1 << DEST_NEXTCLOUD_TASKS)
 
 // Ink theme — strict black & white
 #define C_SCREEN   GColorBlack
@@ -177,6 +179,7 @@ static DictationSession *s_dictation_session;
 static char s_note_buf[NOTE_BUF_SIZE];
 static char s_ai_response_buf[NOTE_BUF_SIZE];
 static char s_status_buf[STATUS_BUF_SIZE];
+static char s_webhook_msg_buf[120];   // two-way webhook reply shown on success screen
 static char s_conversation_buf[CONV_BUF_SIZE];
 static int  s_conv_loading_at = -1;   // offset of "..." in s_conversation_buf
 
@@ -304,7 +307,8 @@ static const char *dest_full_name(int dest) {
         case DEST_WEBHOOK:   return "Webhook";
         case DEST_LOCAL:     return "Local Note";
         case DEST_TODOIST:   return "Todoist";
-        case DEST_NEXTCLOUD: return "Nextcloud";
+        case DEST_NEXTCLOUD: return "Nextcloud Notes";
+        case DEST_NEXTCLOUD_TASKS: return "Nextcloud Tasks";
         default:             return "?";
     }
 }
@@ -760,6 +764,7 @@ static void inbox_received_callback(DictionaryIterator *iter, void *context) {
         if (ok == 1) {
             Tuple *dest_t = dict_find(iter, MESSAGE_KEY_DEST_USED);
             int dest = dest_t ? (int)dest_t->value->int32 : 0;
+            s_webhook_msg_buf[0] = '\0';
             if (dest == DEST_LOCAL) {
                 reminders_add(s_note_buf);
                 set_status("Saved locally ✓");
@@ -768,6 +773,12 @@ static void inbox_received_callback(DictionaryIterator *iter, void *context) {
                 const char *ext_id = (ext_t && ext_t->value->cstring[0])
                                      ? ext_t->value->cstring : NULL;
                 history_save_item(s_note_buf, NULL, dest, ext_id);
+                // Two-way webhook: stash the endpoint's reply to show on the success screen.
+                Tuple *webhook_msg_t = dict_find(iter, MESSAGE_KEY_WEBHOOK_MSG);
+                if (webhook_msg_t && webhook_msg_t->value->cstring[0]) {
+                    strncpy(s_webhook_msg_buf, webhook_msg_t->value->cstring, sizeof(s_webhook_msg_buf) - 1);
+                    s_webhook_msg_buf[sizeof(s_webhook_msg_buf) - 1] = '\0';
+                }
                 char msg[STATUS_BUF_SIZE];
                 snprintf(msg, sizeof(msg), "Sent → %s ✓", dest_full_name(dest));
                 set_status(msg);
@@ -1071,6 +1082,7 @@ static void draw_dest_glyph(GContext *ctx, int dest, GPoint c, GColor fg) {
         case DEST_TODOIST:   draw_glyph_letter(ctx, 'T', c, fg); break;
         case DEST_WEBHOOK:   draw_glyph_letter(ctx, 'H', c, fg); break;
         case DEST_NEXTCLOUD: draw_glyph_letter(ctx, 'C', c, fg); break;
+        case DEST_NEXTCLOUD_TASKS: draw_glyph_letter(ctx, 'C', c, fg); break;
         default:             draw_glyph_letter(ctx, '?', c, fg); break;
     }
 }
@@ -1312,9 +1324,12 @@ static void success_canvas_update(Layer *layer, GContext *ctx) {
         GRect(gx + tile + gap, chip_cy - chip_h / 2, ns.w + 4, chip_h),
         GTextOverflowModeFill, GTextAlignmentLeft, NULL);
 
-    // Transcript quote (dimmed, up to 2 lines)
-    graphics_context_set_text_color(ctx, GColorLightGray);
-    graphics_draw_text(ctx, s_success_quote, app_font(AF_FOOTER),
+    // Two-way webhook reply (if any) replaces the transcript quote — the
+    // endpoint talked back, so show what it said. Otherwise the dimmed quote.
+    bool has_reply = (s_success_dest == DEST_WEBHOOK && s_webhook_msg_buf[0]);
+    const char *footer = has_reply ? s_webhook_msg_buf : s_success_quote;
+    graphics_context_set_text_color(ctx, has_reply ? C_ON_SCREEN : GColorLightGray);
+    graphics_draw_text(ctx, footer, app_font(AF_FOOTER),
         GRect(8, h * 72 / 100 + y_shift + dumped_gap, w - 16, 40),
         GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 }
