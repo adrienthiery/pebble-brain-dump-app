@@ -716,59 +716,6 @@ function createNotionDbPage(text, token, dbId, titleProp, cb) {
     xhr.send(JSON.stringify(body));
 }
 
-// Probe a saved Notion target when the settings page opens, so the user sees
-// what it resolved to. Runs in pkjs (no browser CORS limit). Returns an HTML
-// <p> snippet via done(). Distinguishes database / page / not-shared / bad-token
-// and always calls done() (incl. on error/timeout) so settings still opens.
-function detectNotionForConfig(token, id, override, done) {
-    function htmlSafe(s) { return ('' + s).replace(/[<>&]/g, ''); }
-    function note(color, msg) {
-        return '<p class="note"' + (color ? ' style="color:' + color + '"' : '') + '>' + msg + '</p>';
-    }
-    var finished = false;
-    function finish(s) { if (!finished) { finished = true; done(s); } }
-
-    var db = new XMLHttpRequest();
-    db.open('GET', 'https://api.notion.com/v1/databases/' + id);
-    db.setRequestHeader('Authorization', 'Bearer ' + token);
-    db.setRequestHeader('Notion-Version', '2022-06-28');
-    db.timeout = 6000;
-    db.onload = function() {
-        if (this.status >= 200 && this.status < 300) {
-            var prop = override || 'Name';
-            if (!override) {
-                try {
-                    var d = JSON.parse(this.responseText);
-                    for (var k in d.properties) {
-                        if (d.properties[k] && d.properties[k].type === 'title') { prop = k; break; }
-                    }
-                } catch (e) {}
-            }
-            finish(note('#4c4', '✓ Detected a database — a new row per note (title column: ' + htmlSafe(prop) + ').'));
-            return;
-        }
-        if (this.status === 401) { finish(note('#f66', '⚠ Notion token is invalid.')); return; }
-        // Not a database — check whether it's a reachable page.
-        var pg = new XMLHttpRequest();
-        pg.open('GET', 'https://api.notion.com/v1/pages/' + id);
-        pg.setRequestHeader('Authorization', 'Bearer ' + token);
-        pg.setRequestHeader('Notion-Version', '2022-06-28');
-        pg.timeout = 6000;
-        pg.onload = function() {
-            if (this.status >= 200 && this.status < 300)
-                finish(note('#4c4', '✓ Detected a page — the note is appended as a text block.'));
-            else if (this.status === 401) finish(note('#f66', '⚠ Notion token is invalid.'));
-            else finish(note('#f66', '⚠ Target not found — check the URL/ID and share it with the integration.'));
-        };
-        pg.onerror   = function() { finish(note('', 'Could not reach Notion to verify the target.')); };
-        pg.ontimeout = function() { finish(note('', 'Notion verification timed out.')); };
-        pg.send();
-    };
-    db.onerror   = function() { finish(note('', 'Could not reach Notion to verify the target.')); };
-    db.ontimeout = function() { finish(note('', 'Notion verification timed out.')); };
-    db.send();
-}
-
 // ============================================================================
 // AI AGENT  (OpenAI-compatible)
 // ============================================================================
@@ -1511,7 +1458,6 @@ Pebble.addEventListener('showConfiguration', function() {
     function chk(v) { return v ? 'checked' : ''; }
     function sel(a, b) { return a === b ? 'selected' : ''; }
 
-    function render(notionStatus) {
     var html = '<!DOCTYPE html><html><head>' +
     '<meta name="viewport" content="width=device-width,initial-scale=1">' +
     '<style>' +
@@ -1618,11 +1564,11 @@ Pebble.addEventListener('showConfiguration', function() {
     '<label class="toggle-label"><input type="checkbox" id="notion_enabled" ' + chk(cfg.notion_enabled) + '>' +
     ' Notion</label>' +
     '<div class="fields">' +
-    'API token:<input type="password" id="notion_token" value=\'' + esc(cfg.notion_token) + '\'>' +
+    'API token:<input type="password" id="notion_token" value=\'' + esc(cfg.notion_token) + '\' onblur="verifyNotion()">' +
     '<p class="note">Generate a token at <a href="https://www.notion.so/developers/tokens" target="_blank">notion.so/developers/tokens</a></p>' +
-    'Target page or database URL/ID:<input type="text" id="notion_page_id" value=\'' + esc(cfg.notion_page_id) + '\' placeholder="https://notion.so/... or page/database ID">' +
+    'Target page or database URL/ID:<input type="text" id="notion_page_id" value=\'' + esc(cfg.notion_page_id) + '\' placeholder="https://notion.so/... or page/database ID" onblur="verifyNotion()">' +
     '<p class="note">Paste a page or a database — the app detects which it is. A page gets the note appended as a text block; a database gets a new row per note. Share the target with your integration in Notion (··· → Connections).</p>' +
-    (notionStatus || '') +
+    '<div id="notion_status" class="note"></div>' +
     'Database title column (optional):<input type="text" id="notion_title_prop" value=\'' + esc(cfg.notion_title_prop) + '\' placeholder="auto-detected (e.g. Name)">' +
     '<p class="note">Only if a database\'s title column is auto-detected wrongly — otherwise leave blank.</p>' +
     '<br>Routing keywords (comma-separated, added to defaults):<input type="text" id="notion_keywords"' +
@@ -1787,12 +1733,55 @@ Pebble.addEventListener('showConfiguration', function() {
       '}' +
       'fetchPage(null);' +
     '}' +
+    // Notion: verify the entered page/database live (client-side, like Todoist).
+    // Runs on blur of the target field and on load. Detects database vs page and
+    // surfaces token / not-shared errors, so users get feedback without saving.
+    'function notionId(v){' +
+      'v=(v||"").trim();' +
+      'var m=v.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);' +
+      'if(m)return m[1];' +
+      'm=v.match(/([0-9a-f]{32})(?:[^0-9a-f]|$)/i);' +
+      'if(m)return m[1];' +
+      'return v;' +
+    '}' +
+    'function verifyNotion(){' +
+      'var st=document.getElementById("notion_status");' +
+      'var token=document.getElementById("notion_token").value.trim();' +
+      'var id=notionId(document.getElementById("notion_page_id").value);' +
+      'if(!token||!id){st.textContent="";return;}' +
+      'st.style.color="#aaa";st.textContent="Checking\\u2026";' +
+      'var db=new XMLHttpRequest();' +
+      'db.open("GET","https://api.notion.com/v1/databases/"+id);' +
+      'db.setRequestHeader("Authorization","Bearer "+token);' +
+      'db.setRequestHeader("Notion-Version","2022-06-28");' +
+      'db.onload=function(){' +
+        'if(this.status>=200&&this.status<300){' +
+          'var prop="Name";try{var d=JSON.parse(this.responseText);for(var k in d.properties){if(d.properties[k]&&d.properties[k].type==="title"){prop=k;break;}}}catch(e){}' +
+          'st.style.color="#4c4";st.textContent="\\u2713 Database detected \\u2014 a new row per note (title column: "+prop+").";return;' +
+        '}' +
+        'if(this.status===401){st.style.color="#f66";st.textContent="\\u26a0 Invalid Notion token.";return;}' +
+        'var pg=new XMLHttpRequest();' +
+        'pg.open("GET","https://api.notion.com/v1/pages/"+id);' +
+        'pg.setRequestHeader("Authorization","Bearer "+token);' +
+        'pg.setRequestHeader("Notion-Version","2022-06-28");' +
+        'pg.onload=function(){' +
+          'if(this.status>=200&&this.status<300){st.style.color="#4c4";st.textContent="\\u2713 Page detected \\u2014 note appended as a text block.";}' +
+          'else if(this.status===401){st.style.color="#f66";st.textContent="\\u26a0 Invalid Notion token.";}' +
+          'else{st.style.color="#f66";st.textContent="\\u26a0 Not found \\u2014 check the URL/ID and share it with your integration.";}' +
+        '};' +
+        'pg.onerror=function(){st.style.color="#f66";st.textContent="Couldn\\u2019t reach Notion.";};' +
+        'pg.send();' +
+      '};' +
+      'db.onerror=function(){st.style.color="#f66";st.textContent="Couldn\\u2019t reach Notion (blocked or offline).";};' +
+      'db.send();' +
+    '}' +
     'window.addEventListener("load",function(){' +
       'var tok=document.getElementById("tasks_access_token").value;' +
       'if(tok)fetchTaskLists(tok);' +
       'else document.getElementById("tasks_list_id").innerHTML=\'<option value="">Default list</option>\';' +
       'var tdTok=document.getElementById("todoist_token").value;' +
       'if(tdTok)fetchTodoistProjects(tdTok);' +
+      'verifyNotion();' +
     '});' +
     'function copyAuthUrl(){' +
       'var el=document.getElementById("tasks_auth_url");' +
@@ -1897,17 +1886,6 @@ Pebble.addEventListener('showConfiguration', function() {
     '<\/script></body></html>';
 
     Pebble.openURL('data:text/html,' + encodeURIComponent(html));
-    }
-
-    // Verify a previously-saved Notion target before opening settings, so the
-    // page shows what it resolved to. Skip (open instantly) when Notion isn't
-    // configured — otherwise probe, then render with the detection result.
-    var nId = extractNotionPageId(cfg.notion_page_id);
-    if (cfg.notion_enabled && cfg.notion_token && nId) {
-        detectNotionForConfig(cfg.notion_token, nId, (cfg.notion_title_prop || '').trim(), render);
-    } else {
-        render('');
-    }
 });
 
 Pebble.addEventListener('webviewclosed', function(e) {
