@@ -627,10 +627,46 @@ function extractNotionPageId(urlOrId) {
 }
 
 function sendToNotion(text, cfg, cb) {
-    var token  = cfg.notion_token;
-    var pageId = extractNotionPageId(cfg.notion_page_id);
-    if (!token || !pageId) { cb(false, 'Notion not configured'); return; }
+    var token = cfg.notion_token;
+    var id    = extractNotionPageId(cfg.notion_page_id);
+    if (!token || !id) { cb(false, 'Notion not configured'); return; }
 
+    var override = (cfg.notion_title_prop || '').trim();
+
+    // Auto-detect the target's nature so the user just pastes a URL/ID: GET the
+    // database endpoint — 2xx means it's a database (and the same response
+    // carries its schema, so we also learn the title-property name); anything
+    // else means treat it as a page and append a block. One probe, no toggle.
+    var q = new XMLHttpRequest();
+    q.open('GET', 'https://api.notion.com/v1/databases/' + id);
+    q.setRequestHeader('Authorization', 'Bearer ' + token);
+    q.setRequestHeader('Notion-Version', '2022-06-28');
+    q.onload = function() {
+        if (this.status >= 200 && this.status < 300) {
+            // Database → create a new row with the note as its title.
+            var titleProp = override || 'Name';
+            if (!override) {
+                try {
+                    var db = JSON.parse(this.responseText);
+                    for (var k in db.properties) {
+                        if (db.properties[k] && db.properties[k].type === 'title') { titleProp = k; break; }
+                    }
+                } catch (e) {}
+            }
+            createNotionDbPage(text, token, id, titleProp, cb);
+        } else if (this.status === 401) {
+            cb(false, 'Invalid Notion token');
+        } else {
+            // Not a database (a page, or not shared) → append as a block.
+            // appendNotionBlock surfaces its own not-found/not-shared error.
+            appendNotionBlock(text, token, id, cb);
+        }
+    };
+    q.onerror = function() { cb(false, 'Network error'); };
+    q.send();
+}
+
+function appendNotionBlock(text, token, pageId, cb) {
     var body = {
         children: [{
             object: 'block',
@@ -640,17 +676,97 @@ function sendToNotion(text, cfg, cb) {
             }
         }]
     };
-
     var xhr = new XMLHttpRequest();
     xhr.open('PATCH', 'https://api.notion.com/v1/blocks/' + pageId + '/children');
     xhr.setRequestHeader('Authorization', 'Bearer ' + token);
     xhr.setRequestHeader('Content-Type', 'application/json');
     xhr.setRequestHeader('Notion-Version', '2022-06-28');
     xhr.onload = function() {
-        cb(this.status >= 200 && this.status < 300, 'notion');
+        if (this.status >= 200 && this.status < 300) { cb(true, 'notion'); }
+        else if (this.status === 401) { cb(false, 'Invalid Notion token'); }
+        else if (this.status === 404) { cb(false, 'Page not found / not shared'); }
+        else { cb(false, 'Notion error ' + this.status); }
     };
     xhr.onerror = function() { cb(false, 'Network error'); };
     xhr.send(JSON.stringify(body));
+}
+
+// Create a new page (row) inside a Notion database, with the note as its title.
+// titleProp is the database's title-column name (auto-detected by the caller).
+function createNotionDbPage(text, token, dbId, titleProp, cb) {
+    var props = {};
+    props[titleProp] = { title: [{ text: { content: text.substring(0, 2000) } }] };
+    var body = { parent: { database_id: dbId }, properties: props };
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', 'https://api.notion.com/v1/pages');
+    xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.setRequestHeader('Notion-Version', '2022-06-28');
+    xhr.onload = function() {
+        if (this.status >= 200 && this.status < 300) { cb(true, 'notion'); }
+        else if (this.status === 401) { cb(false, 'Invalid Notion token'); }
+        else if (this.status === 404) { cb(false, 'Database not found / not shared'); }
+        else if (this.status === 400) {
+            console.log('Notion DB 400: ' + this.responseText);
+            cb(false, 'Check title property "' + titleProp + '"');
+        }
+        else { cb(false, 'Notion error ' + this.status); }
+    };
+    xhr.onerror = function() { cb(false, 'Network error'); };
+    xhr.send(JSON.stringify(body));
+}
+
+// Probe a saved Notion target when the settings page opens, so the user sees
+// what it resolved to. Runs in pkjs (no browser CORS limit). Returns an HTML
+// <p> snippet via done(). Distinguishes database / page / not-shared / bad-token
+// and always calls done() (incl. on error/timeout) so settings still opens.
+function detectNotionForConfig(token, id, override, done) {
+    function htmlSafe(s) { return ('' + s).replace(/[<>&]/g, ''); }
+    function note(color, msg) {
+        return '<p class="note"' + (color ? ' style="color:' + color + '"' : '') + '>' + msg + '</p>';
+    }
+    var finished = false;
+    function finish(s) { if (!finished) { finished = true; done(s); } }
+
+    var db = new XMLHttpRequest();
+    db.open('GET', 'https://api.notion.com/v1/databases/' + id);
+    db.setRequestHeader('Authorization', 'Bearer ' + token);
+    db.setRequestHeader('Notion-Version', '2022-06-28');
+    db.timeout = 6000;
+    db.onload = function() {
+        if (this.status >= 200 && this.status < 300) {
+            var prop = override || 'Name';
+            if (!override) {
+                try {
+                    var d = JSON.parse(this.responseText);
+                    for (var k in d.properties) {
+                        if (d.properties[k] && d.properties[k].type === 'title') { prop = k; break; }
+                    }
+                } catch (e) {}
+            }
+            finish(note('#4c4', '✓ Detected a database — a new row per note (title column: ' + htmlSafe(prop) + ').'));
+            return;
+        }
+        if (this.status === 401) { finish(note('#f66', '⚠ Notion token is invalid.')); return; }
+        // Not a database — check whether it's a reachable page.
+        var pg = new XMLHttpRequest();
+        pg.open('GET', 'https://api.notion.com/v1/pages/' + id);
+        pg.setRequestHeader('Authorization', 'Bearer ' + token);
+        pg.setRequestHeader('Notion-Version', '2022-06-28');
+        pg.timeout = 6000;
+        pg.onload = function() {
+            if (this.status >= 200 && this.status < 300)
+                finish(note('#4c4', '✓ Detected a page — the note is appended as a text block.'));
+            else if (this.status === 401) finish(note('#f66', '⚠ Notion token is invalid.'));
+            else finish(note('#f66', '⚠ Target not found — check the URL/ID and share it with the integration.'));
+        };
+        pg.onerror   = function() { finish(note('', 'Could not reach Notion to verify the target.')); };
+        pg.ontimeout = function() { finish(note('', 'Notion verification timed out.')); };
+        pg.send();
+    };
+    db.onerror   = function() { finish(note('', 'Could not reach Notion to verify the target.')); };
+    db.ontimeout = function() { finish(note('', 'Notion verification timed out.')); };
+    db.send();
 }
 
 // ============================================================================
@@ -1395,6 +1511,7 @@ Pebble.addEventListener('showConfiguration', function() {
     function chk(v) { return v ? 'checked' : ''; }
     function sel(a, b) { return a === b ? 'selected' : ''; }
 
+    function render(notionStatus) {
     var html = '<!DOCTYPE html><html><head>' +
     '<meta name="viewport" content="width=device-width,initial-scale=1">' +
     '<style>' +
@@ -1503,7 +1620,11 @@ Pebble.addEventListener('showConfiguration', function() {
     '<div class="fields">' +
     'API token:<input type="password" id="notion_token" value=\'' + esc(cfg.notion_token) + '\'>' +
     '<p class="note">Generate a token at <a href="https://www.notion.so/developers/tokens" target="_blank">notion.so/developers/tokens</a></p>' +
-    'Target page URL or ID:<input type="text" id="notion_page_id" value=\'' + esc(cfg.notion_page_id) + '\' placeholder="https://notion.so/My-Page-abc123... or page ID">' +
+    'Target page or database URL/ID:<input type="text" id="notion_page_id" value=\'' + esc(cfg.notion_page_id) + '\' placeholder="https://notion.so/... or page/database ID">' +
+    '<p class="note">Paste a page or a database — the app detects which it is. A page gets the note appended as a text block; a database gets a new row per note. Share the target with your integration in Notion (··· → Connections).</p>' +
+    (notionStatus || '') +
+    'Database title column (optional):<input type="text" id="notion_title_prop" value=\'' + esc(cfg.notion_title_prop) + '\' placeholder="auto-detected (e.g. Name)">' +
+    '<p class="note">Only if a database\'s title column is auto-detected wrongly — otherwise leave blank.</p>' +
     '<br>Routing keywords (comma-separated, added to defaults):<input type="text" id="notion_keywords"' +
     ' value=\'' + esc(cfg.notion_keywords) + '\' placeholder="idea, log, draft, ...">' +
     '</div></div>' +
@@ -1744,6 +1865,7 @@ Pebble.addEventListener('showConfiguration', function() {
     'notion_enabled:document.getElementById("notion_enabled").checked,' +
     'notion_token:document.getElementById("notion_token").value.trim(),' +
     'notion_page_id:document.getElementById("notion_page_id").value,' +
+    'notion_title_prop:document.getElementById("notion_title_prop").value.trim(),' +
     'notion_keywords:document.getElementById("notion_keywords").value.trim(),' +
     'nextcloud_enabled:document.getElementById("nextcloud_enabled").checked,' +
     'nextcloud_url:document.getElementById("nextcloud_url").value.trim(),' +
@@ -1775,6 +1897,17 @@ Pebble.addEventListener('showConfiguration', function() {
     '<\/script></body></html>';
 
     Pebble.openURL('data:text/html,' + encodeURIComponent(html));
+    }
+
+    // Verify a previously-saved Notion target before opening settings, so the
+    // page shows what it resolved to. Skip (open instantly) when Notion isn't
+    // configured — otherwise probe, then render with the detection result.
+    var nId = extractNotionPageId(cfg.notion_page_id);
+    if (cfg.notion_enabled && cfg.notion_token && nId) {
+        detectNotionForConfig(cfg.notion_token, nId, (cfg.notion_title_prop || '').trim(), render);
+    } else {
+        render('');
+    }
 });
 
 Pebble.addEventListener('webviewclosed', function(e) {
