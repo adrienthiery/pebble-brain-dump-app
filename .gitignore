@@ -1,2 +1,4 @@
 build/
 .lock-waf*
+src/pkjs/secrets.js
+secrets.js
