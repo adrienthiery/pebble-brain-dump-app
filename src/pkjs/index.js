@@ -454,19 +454,39 @@ function extractDueDate(text) {
     var t = text.toLowerCase();
     var now = new Date(), d = null;
 
-    if (t.indexOf('tomorrow') >= 0) {
+    // Day-after-tomorrow — checked before "tomorrow" so it isn't shadowed.
+    if (/(day after tomorrow|[\xfcu]bermorgen|apr[e\xe8]s-demain|pasado\s+ma[n\xf1]ana)/.test(t)) {
+        d = new Date(now); d.setDate(d.getDate() + 2);
+    }
+    // Tomorrow — EN/FR + DE "morgen" (but not "heute/am morgen" = this morning)
+    // + ES "mañana" (but not "(esta|por la|de la) mañana" = this morning).
+    else if (/\b(tomorrow|demain)\b/.test(t) ||
+             (/\bmorgen\b/.test(t)    && !/\b(?:heute|am)\s+morgen\b/.test(t)) ||
+             (/\bma[n\xf1]ana\b/.test(t) && !/(?:esta|por\s+la|de\s+la|la)\s+ma[n\xf1]ana/.test(t))) {
         d = new Date(now); d.setDate(d.getDate() + 1);
-    } else if (t.indexOf('today') >= 0 || t.indexOf('tonight') >= 0) {
+    }
+    else if (/\b(today|tonight|heute|aujourd|hoy)\b/.test(t)) {
         d = new Date(now);
-    } else {
-        var days = ['sunday','monday','tuesday','wednesday',
-                    'thursday','friday','saturday'];
-        for (var i = 0; i < days.length; i++) {
-            if (t.indexOf(days[i]) >= 0) {
-                d = new Date(now);
-                var diff = (i - d.getDay() + 7) % 7 || 7;
-                d.setDate(d.getDate() + diff);
-                break;
+    }
+    else {
+        // Weekday names EN/DE/FR/ES → index 0=Sun .. 6=Sat.
+        var WD = [
+            ['sunday','sonntag','dimanche','domingo'],
+            ['monday','montag','lundi','lunes'],
+            ['tuesday','dienstag','mardi','martes'],
+            ['wednesday','mittwoch','mercredi','mi\xe9rcoles','miercoles'],
+            ['thursday','donnerstag','jeudi','jueves'],
+            ['friday','freitag','vendredi','viernes'],
+            ['saturday','samstag','sonnabend','samedi','s\xe1bado','sabado']
+        ];
+        for (var i = 0; i < 7 && !d; i++) {
+            for (var j = 0; j < WD[i].length; j++) {
+                if (t.indexOf(WD[i][j]) >= 0) {
+                    d = new Date(now);
+                    var diff = (i - d.getDay() + 7) % 7 || 7;
+                    d.setDate(d.getDate() + diff);
+                    break;
+                }
             }
         }
     }
@@ -1064,44 +1084,68 @@ function cleanNoteText(text) {
 
 // Strip trailing date/time expressions from task titles (content captured in due field).
 // Only used for task-manager destinations (Google Tasks, Todoist) — notes keep full text.
+// Remove a trailing due-date / time tail from a task title, so "Buy milk due
+// Saturday at 3 pm" becomes "Buy milk". Multilingual (EN/DE/FR/ES).
+//
+// SAFETY MODEL — this only ever trims a trailing date/time tail:
+//   1. Callers only invoke it when extractDueDate() actually found a date.
+//   2. Every pattern is anchored to end-of-string ($): mid-sentence text is
+//      never touched.
+//   3. A connector word (due / by / fällig / pour / para …) is baked into each
+//      date pattern as an OPTIONAL lead-in, so it is only removed together with
+//      the date token it introduces — a bare "on"/"for" with no date after it
+//      survives ("turn the heater on" keeps "on").
+//   4. If the result would be shorter than 3 chars, the original is kept.
 function stripDateTimeFromText(text) {
     var original = text.trim();
 
+    // Optional connector introducing a trailing date, per language.
+    var DL =
+        '(?:due\\s+|by\\s+|on\\s+|for\\s+|before\\s+|until\\s+|till\\s+|no\\s+later\\s+than\\s+|' + // EN
+        'f[\\xe4a]llig\\s+am\\s+|f[\\xe4a]llig\\s+|bis\\s+zum\\s+|bis\\s+|am\\s+|n[\\xe4a]chste[rn]?\\s+|' + // DE
+        'pour\\s+le\\s+|pour\\s+|avant\\s+le\\s+|avant\\s+|d\'ici\\s+|le\\s+|' + // FR
+        'para\\s+el\\s+|para\\s+|antes\\s+del?\\s+|hasta\\s+el\\s+|hasta\\s+|el\\s+|' + // ES
+        'next\\s+|this\\s+)?';
+    // Optional connector before a trailing time ("at 3", "um 15 Uhr", "à 15h", "a las 3").
+    var TL = '(?:at\\s+|um\\s+|gegen\\s+|\\xe0\\s+|a\\s+las\\s+|a\\s+)?';
+
+    function R(body) { return new RegExp('[,.]?\\s+' + body + '$', 'i'); }
+
     function stripTrailing(s) {
         return s
-            // Trailing time — AM/PM and 24h
-            .replace(/[,.]?\s+at\s+\d{1,2}(?::\d{2})?\s*[ap]\.?\s?m\.?$/i, '')
-            .replace(/[,.]?\s+\d{1,2}(?::\d{2})?\s*[ap]\.?\s?m\.?$/i, '')
-            .replace(/[,.]?\s+at\s+(?:[01]?\d|2[0-3]):[0-5]\d$/i, '')
-            .replace(/[,.]?\s+\d{1,2}h\s?\d{0,2}$/i, '')
-            .replace(/[,.]?\s+\d{1,2}\s+(?:heures?|uhr)(?:\s+\d{1,2})?$/i, '')
-            // Trailing named time
-            .replace(/[,.]?\s+at\s+(?:noon|midnight|lunchtime)$/i, '')
-            .replace(/[,.]?\s+(?:in\s+the\s+)?(?:this\s+)?(?:morning|afternoon|evening)$/i, '')
-            .replace(/[,.]?\s+(?:at\s+)?(?:tonight|midnight|noon|lunchtime)$/i, '')
-            .replace(/[,.]?\s+(?:at\s+)?(?:dinner|breakfast|lunch)(?:time)?$/i, '')
-            .replace(/[,.]?\s+(?:heute\s+(?:morgen|abend|nacht|nachmittag)|morgens|abends)$/i, '')
-            .replace(/[,.]?\s+(?:ce\s+matin|cet?\s+apr[eè]s-midi|ce\s+soir)$/i, '')
-            .replace(/[,.]?\s+(?:esta\s+(?:ma[nñ]ana|tarde|noche)|por\s+la\s+(?:ma[nñ]ana|tarde|noche))$/i, '')
-            // Trailing date
-            .replace(/[,.]?\s+(?:by\s+|on\s+|for\s+)?tomorrow$/i, '')
-            .replace(/[,.]?\s+today$/i, '')
-            .replace(/[,.]?\s+(?:on\s+)?(?:next\s+|this\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)$/i, '')
-            .replace(/[,.]?\s+next\s+(?:week|month)$/i, '')
-            .replace(/[,.]?\s+by\s+(?:end\s+of\s+)?(?:today|tomorrow|this\s+week|this\s+month)$/i, '')
-            .replace(/[,.]?\s+(?:morgen|[üu]bermorgen)$/i, '')
-            .replace(/[,.]?\s+(?:am\s+)?(?:montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonntag)$/i, '')
-            .replace(/[,.]?\s+n[äa]chste[rn]?\s+(?:woche|monat|montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonntag)$/i, '')
-            .replace(/[,.]?\s+demain$/i, '')
-            .replace(/[,.]?\s+(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)$/i, '')
-            .replace(/[,.]?\s+la\s+semaine\s+prochaine$/i, '')
-            .replace(/[,.]?\s+ma[nñ]ana$/i, '')
-            .replace(/[,.]?\s+(?:lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo)$/i, '')
+            // ── Trailing time ──
+            .replace(R(TL + '\\d{1,2}(?::\\d{2})?\\s*[ap]\\.?\\s?m\\.?'), '')          // 3 pm / at 3:30 p.m.
+            .replace(R(TL + '(?:[01]?\\d|2[0-3]):[0-5]\\d'), '')                        // 15:00 / at 15:00
+            .replace(R(TL + '\\d{1,2}h\\s?\\d{0,2}'), '')                               // 15h / à 6h30
+            .replace(R(TL + '\\d{1,2}\\s+(?:heures?|uhr)(?:\\s+\\d{1,2})?'), '')        // um 15 Uhr / à 6 heures
+            .replace(R(TL + '(?:noon|midnight|lunchtime)'), '')
+            .replace(R('(?:in\\s+the\\s+)?(?:this\\s+)?(?:morning|afternoon|evening)'), '')
+            .replace(R('(?:at\\s+)?(?:tonight|midnight|noon|lunchtime)'), '')
+            .replace(R('(?:at\\s+)?(?:dinner|breakfast|lunch)(?:time)?'), '')
+            .replace(R('(?:heute\\s+(?:morgen|abend|nacht|nachmittag)|morgens|abends)'), '')
+            .replace(R('(?:um\\s+)?(?:mittag|mitternacht)'), '')
+            .replace(R('(?:ce\\s+matin|cet?\\s+apr[e\\xe8]s-midi|ce\\s+soir)'), '')
+            .replace(R('(?:esta\\s+(?:ma[n\\xf1]ana|tarde|noche)|por\\s+la\\s+(?:ma[n\\xf1]ana|tarde|noche))'), '')
+            // ── Trailing date ──
+            .replace(R(DL + 'tomorrow'), '')
+            .replace(R(DL + 'today'), '')
+            .replace(R(DL + '(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)'), '')
+            .replace(R('(?:by\\s+)?(?:end\\s+of\\s+)?(?:this\\s+week|this\\s+month|next\\s+week|next\\s+month)'), '')
+            .replace(R(DL + '(?:morgen|[\\xfcu]bermorgen)'), '')
+            .replace(R(DL + '(?:montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonnabend|sonntag)'), '')
+            .replace(R('n[\\xe4a]chste[rn]?\\s+(?:woche|monat)'), '')
+            .replace(R(DL + 'demain'), '')
+            .replace(R(DL + '(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)'), '')
+            .replace(R('la\\s+semaine\\s+prochaine'), '')
+            .replace(R(DL + 'ma[n\\xf1]ana'), '')
+            .replace(R(DL + '(?:lunes|martes|mi[e\\xe9]rcoles|jueves|viernes|s[a\\xe1]bado|domingo)'), '')
             .trim();
     }
 
-    // Two passes: handles "at 15:00 on Friday" → strip "on Friday" → strip "at 15:00"
-    var t = stripTrailing(stripTrailing(original));
+    // Loop until stable — handles any order of interleaved date/time/connector
+    // tokens, e.g. "due Saturday at 3pm" or "fällig am Samstag um 15 Uhr".
+    var t = original, prev;
+    for (var k = 0; k < 4; k++) { prev = t; t = stripTrailing(t); if (t === prev) break; }
     return (t.length >= 3) ? t : original;
 }
 

@@ -154,23 +154,88 @@ function extractTime(text, nowHour) {
 function extractDueDate(text) {
     var t = text.toLowerCase();
     var now = new Date(), d = null;
-    if (t.indexOf('tomorrow') >= 0) {
+
+    if (/(day after tomorrow|[\xfcu]bermorgen|apr[e\xe8]s-demain|pasado\s+ma[n\xf1]ana)/.test(t)) {
+        d = new Date(now); d.setDate(d.getDate() + 2);
+    }
+    else if (/\b(tomorrow|demain)\b/.test(t) ||
+             (/\bmorgen\b/.test(t)    && !/\b(?:heute|am)\s+morgen\b/.test(t)) ||
+             (/\bma[n\xf1]ana\b/.test(t) && !/(?:esta|por\s+la|de\s+la|la)\s+ma[n\xf1]ana/.test(t))) {
         d = new Date(now); d.setDate(d.getDate() + 1);
-    } else if (t.indexOf('today') >= 0 || t.indexOf('tonight') >= 0) {
+    }
+    else if (/\b(today|tonight|heute|aujourd|hoy)\b/.test(t)) {
         d = new Date(now);
-    } else {
-        var days = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
-        for (var i = 0; i < days.length; i++) {
-            if (t.indexOf(days[i]) >= 0) {
-                d = new Date(now);
-                var diff = (i - d.getDay() + 7) % 7 || 7;
-                d.setDate(d.getDate() + diff);
-                break;
+    }
+    else {
+        var WD = [
+            ['sunday','sonntag','dimanche','domingo'],
+            ['monday','montag','lundi','lunes'],
+            ['tuesday','dienstag','mardi','martes'],
+            ['wednesday','mittwoch','mercredi','mi\xe9rcoles','miercoles'],
+            ['thursday','donnerstag','jeudi','jueves'],
+            ['friday','freitag','vendredi','viernes'],
+            ['saturday','samstag','sonnabend','samedi','s\xe1bado','sabado']
+        ];
+        for (var i = 0; i < 7 && !d; i++) {
+            for (var j = 0; j < WD[i].length; j++) {
+                if (t.indexOf(WD[i][j]) >= 0) {
+                    d = new Date(now);
+                    var diff = (i - d.getDay() + 7) % 7 || 7;
+                    d.setDate(d.getDate() + diff);
+                    break;
+                }
             }
         }
     }
     if (!d && extractTime(text)) d = new Date(now);
     return d ? d.toISOString().split('T')[0] + 'T00:00:00.000Z' : null;
+}
+
+function stripDateTimeFromText(text) {
+    var original = text.trim();
+
+    var DL =
+        '(?:due\\s+|by\\s+|on\\s+|for\\s+|before\\s+|until\\s+|till\\s+|no\\s+later\\s+than\\s+|' +
+        'f[\\xe4a]llig\\s+am\\s+|f[\\xe4a]llig\\s+|bis\\s+zum\\s+|bis\\s+|am\\s+|n[\\xe4a]chste[rn]?\\s+|' +
+        'pour\\s+le\\s+|pour\\s+|avant\\s+le\\s+|avant\\s+|d\'ici\\s+|le\\s+|' +
+        'para\\s+el\\s+|para\\s+|antes\\s+del?\\s+|hasta\\s+el\\s+|hasta\\s+|el\\s+|' +
+        'next\\s+|this\\s+)?';
+    var TL = '(?:at\\s+|um\\s+|gegen\\s+|\\xe0\\s+|a\\s+las\\s+|a\\s+)?';
+
+    function R(body) { return new RegExp('[,.]?\\s+' + body + '$', 'i'); }
+
+    function stripTrailing(s) {
+        return s
+            .replace(R(TL + '\\d{1,2}(?::\\d{2})?\\s*[ap]\\.?\\s?m\\.?'), '')
+            .replace(R(TL + '(?:[01]?\\d|2[0-3]):[0-5]\\d'), '')
+            .replace(R(TL + '\\d{1,2}h\\s?\\d{0,2}'), '')
+            .replace(R(TL + '\\d{1,2}\\s+(?:heures?|uhr)(?:\\s+\\d{1,2})?'), '')
+            .replace(R(TL + '(?:noon|midnight|lunchtime)'), '')
+            .replace(R('(?:in\\s+the\\s+)?(?:this\\s+)?(?:morning|afternoon|evening)'), '')
+            .replace(R('(?:at\\s+)?(?:tonight|midnight|noon|lunchtime)'), '')
+            .replace(R('(?:at\\s+)?(?:dinner|breakfast|lunch)(?:time)?'), '')
+            .replace(R('(?:heute\\s+(?:morgen|abend|nacht|nachmittag)|morgens|abends)'), '')
+            .replace(R('(?:um\\s+)?(?:mittag|mitternacht)'), '')
+            .replace(R('(?:ce\\s+matin|cet?\\s+apr[e\\xe8]s-midi|ce\\s+soir)'), '')
+            .replace(R('(?:esta\\s+(?:ma[n\\xf1]ana|tarde|noche)|por\\s+la\\s+(?:ma[n\\xf1]ana|tarde|noche))'), '')
+            .replace(R(DL + 'tomorrow'), '')
+            .replace(R(DL + 'today'), '')
+            .replace(R(DL + '(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)'), '')
+            .replace(R('(?:by\\s+)?(?:end\\s+of\\s+)?(?:this\\s+week|this\\s+month|next\\s+week|next\\s+month)'), '')
+            .replace(R(DL + '(?:morgen|[\\xfcu]bermorgen)'), '')
+            .replace(R(DL + '(?:montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonnabend|sonntag)'), '')
+            .replace(R('n[\\xe4a]chste[rn]?\\s+(?:woche|monat)'), '')
+            .replace(R(DL + 'demain'), '')
+            .replace(R(DL + '(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)'), '')
+            .replace(R('la\\s+semaine\\s+prochaine'), '')
+            .replace(R(DL + 'ma[n\\xf1]ana'), '')
+            .replace(R(DL + '(?:lunes|martes|mi[e\\xe9]rcoles|jueves|viernes|s[a\\xe1]bado|domingo)'), '')
+            .trim();
+    }
+
+    var t = original, prev;
+    for (var k = 0; k < 4; k++) { prev = t; t = stripTrailing(t); if (t === prev) break; }
+    return (t.length >= 3) ? t : original;
 }
 
 // ============================================================
@@ -197,6 +262,11 @@ function check(label, got, expected) {
 function checkNotNull(label, got) {
     if (got !== null) { passed++; process.stdout.write('  ✓ ' + label + '\n'); }
     else              { failed++; process.stdout.write('  ✗ ' + label + ' (expected non-null)\n'); }
+}
+
+function checkStr(label, got, expected) {
+    if (got === expected) { passed++; process.stdout.write('  ✓ ' + label + '\n'); }
+    else { failed++; process.stdout.write('  ✗ ' + label + '\n      got: "' + got + '"  expected: "' + expected + '"\n'); }
 }
 
 function section(name) { process.stdout.write('\n' + name + '\n'); }
@@ -443,6 +513,55 @@ checkNotNull('las 6 (Xh)',      extractDueDate('cita las 16'));
 
 section('extractDueDate — no time → null');
 check('pure text',        extractDueDate('buy groceries'),                null);
+
+// ============================================================
+// extractDueDate — multilingual dates (weekdays + relative days)
+// ============================================================
+
+section('extractDueDate — German dates');
+checkNotNull('Samstag',       extractDueDate('Milch kaufen am Samstag'));
+checkNotNull('morgen',        extractDueDate('Zahnarzt anrufen morgen'));
+checkNotNull('übermorgen',    extractDueDate('Paket abholen übermorgen'));
+checkNotNull('heute',         extractDueDate('Bericht heute schicken'));
+check('am morgen → morning=today (not tomorrow)',
+      extractDueDate('Yoga am morgen') !== null ? 'ok' : null, 'ok');
+
+section('extractDueDate — French dates');
+checkNotNull('samedi',        extractDueDate('rendre le rapport samedi'));
+checkNotNull('demain',        extractDueDate('appeler le client demain'));
+
+section('extractDueDate — Spanish dates');
+checkNotNull('sábado',        extractDueDate('comprar leche el sábado'));
+checkNotNull('mañana (tomorrow)', extractDueDate('llamar mañana'));
+
+section('extractDueDate — plain non-date text → null');
+check('no date/time DE',  extractDueDate('Rechnung prüfen'),              null);
+check('no date/time FR',  extractDueDate('vérifier la facture'),          null);
+
+// ============================================================
+// stripDateTimeFromText — cut the due/time tail off the task title
+// ============================================================
+
+section('stripDateTimeFromText — English');
+checkStr('due + day + time', stripDateTimeFromText('Do this and that due Saturday at 3 pm'), 'Do this and that');
+checkStr('bare day + time',  stripDateTimeFromText('Review Q3 numbers tomorrow'),            'Review Q3 numbers');
+checkStr('by + 24h',         stripDateTimeFromText('Send invoice by Friday 15:00'),          'Send invoice');
+
+section('stripDateTimeFromText — German');
+checkStr('fällig am + Uhr',  stripDateTimeFromText('Milch kaufen fällig am Samstag um 15 Uhr'), 'Milch kaufen');
+checkStr('bis + Uhr',        stripDateTimeFromText('Bericht schicken bis morgen um 9 Uhr'),      'Bericht schicken');
+
+section('stripDateTimeFromText — French');
+checkStr('pour + à Xh',      stripDateTimeFromText('rendre le rapport pour samedi à 15h'), 'rendre le rapport');
+
+section('stripDateTimeFromText — Spanish');
+checkStr('para el + a las',  stripDateTimeFromText('comprar leche para el sábado a las 3 pm'), 'comprar leche');
+
+section('stripDateTimeFromText — safety (do not remove valuable text)');
+checkStr('no date → unchanged',      stripDateTimeFromText('call mom about the invoice'),   'call mom about the invoice');
+checkStr('trailing particle kept',   stripDateTimeFromText('turn the heater on'),           'turn the heater on');
+checkStr('date word is the content', stripDateTimeFromText('Saturday'),                     'Saturday');
+checkStr('mid-sentence day untouched', stripDateTimeFromText('plan the Friday standup agenda'), 'plan the Friday standup agenda');
 
 // ============================================================
 // Summary
