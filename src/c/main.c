@@ -1966,27 +1966,26 @@ static void hist_up_click(ClickRecognizerRef rec, void *ctx) {
     layer_mark_dirty(s_hist_list_layer);
 }
 
+static void hist_start_dictation_cb(void *ctx) {
+    dictation_session_start(s_dictation_session);
+}
+
+// SELECT is count-aware so it stays correct even when the list empties out via
+// deletions (which fire `appear`, not `load`): empty → it's the record button;
+// populated → open the selected row.
 static void hist_select_click(ClickRecognizerRef rec, void *ctx) {
-    merged_item_open(s_hist_sel);
+    if (s_merged_count == 0) {
+        window_stack_pop(true);
+        app_timer_register(300, hist_start_dictation_cb, NULL);
+    } else {
+        merged_item_open(s_hist_sel);
+    }
 }
 
 static void hist_list_click_config(void *ctx) {
     window_single_click_subscribe(BUTTON_ID_UP,     hist_up_click);
     window_single_click_subscribe(BUTTON_ID_DOWN,   hist_down_click);
     window_single_click_subscribe(BUTTON_ID_SELECT, hist_select_click);
-}
-
-static void hist_start_dictation_cb(void *ctx) {
-    dictation_session_start(s_dictation_session);
-}
-
-static void hist_empty_select_click(ClickRecognizerRef rec, void *ctx) {
-    window_stack_pop(true);
-    app_timer_register(300, hist_start_dictation_cb, NULL);
-}
-
-static void hist_empty_click_config(void *ctx) {
-    window_single_click_subscribe(BUTTON_ID_SELECT, hist_empty_select_click);
 }
 
 static void history_window_appear(Window *window) {
@@ -2015,9 +2014,9 @@ static void history_window_load(Window *window) {
     layer_set_update_proc(s_hist_list_layer, hist_list_update);
     layer_add_child(root, s_hist_list_layer);
 
-    // Empty → SELECT records; populated → up/down/select navigates.
-    window_set_click_config_provider(window,
-        (s_merged_count == 0) ? hist_empty_click_config : hist_list_click_config);
+    // One provider for both states; hist_select_click branches on the live count
+    // so record vs open-item is always correct (see hist_select_click).
+    window_set_click_config_provider(window, hist_list_click_config);
 }
 
 static void history_window_unload(Window *window) {
