@@ -1079,7 +1079,7 @@ static void draw_glyph_letter(GContext *ctx, char letter, GPoint c, GColor fg) {
     GFont font = fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD);
     graphics_context_set_text_color(ctx, fg);
     graphics_draw_text(ctx, ch, font,
-        GRect(c.x - 9, c.y - 13, 18, 18),
+        GRect(c.x - 9, c.y - 11, 18, 18),
         GTextOverflowModeFill, GTextAlignmentCenter, NULL);
 }
 
@@ -1311,7 +1311,7 @@ static void success_canvas_update(Layer *layer, GContext *ctx) {
     graphics_context_set_stroke_color(ctx, C_ON_SCREEN);
     graphics_context_set_stroke_width(ctx, 2);
     graphics_draw_circle(ctx, GPoint(w / 2, med_cy), med_r);
-    draw_check_big(ctx, GPoint(w / 2, med_cy), med_r, C_ON_SCREEN);
+    draw_check_big(ctx, GPoint(w / 2, med_cy + 3), med_r, C_ON_SCREEN);
 
     // Title "DUMPED"
     graphics_context_set_text_color(ctx, C_ON_SCREEN);
@@ -1328,7 +1328,7 @@ static void success_canvas_update(Layer *layer, GContext *ctx) {
     int tile = 20, gap = 6;
     int group_w = tile + gap + ns.w;
     int gx = (w - group_w) / 2;
-    int chip_cy = h * 62 / 100 + y_shift + dumped_gap;
+    int chip_cy = h * 64 / 100 + y_shift + dumped_gap;
     draw_dest_tile(ctx, s_success_dest, GPoint(gx + tile / 2, chip_cy), tile, C_ON_SCREEN);
     graphics_context_set_text_color(ctx, C_ON_SCREEN);
     // Nudge up: Pebble text renders with top leading, so a rect-centered line
@@ -1343,7 +1343,7 @@ static void success_canvas_update(Layer *layer, GContext *ctx) {
     const char *footer = has_reply ? s_webhook_msg_buf : s_success_quote;
     graphics_context_set_text_color(ctx, has_reply ? C_ON_SCREEN : GColorLightGray);
     graphics_draw_text(ctx, footer, app_font(AF_FOOTER),
-        GRect(8, h * 72 / 100 + y_shift + dumped_gap, w - 16, 40),
+        GRect(8, h * 70 / 100 + y_shift + dumped_gap, w - 16, 40),
         GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 }
 
@@ -1983,13 +1983,15 @@ static void draw_merged_row(GContext *ctx, const MergedEntry *e, int y, int w, b
     int mh = app_font_h(AF_FOOTER);
     int pad = (MENU_ROW_H - th - mh) / 2;
     if (pad < 2) pad = 2;
+    // Nudge the title/meta block up (Pebble text has top leading) so it optically
+    // centers on the tile, and pull the meta up to tighten the gap under the title.
     graphics_context_set_text_color(ctx, fg);
     graphics_draw_text(ctx, e->title, app_font(AF_HEADER),
-        GRect(text_x, y + pad, text_w, th + 2),
+        GRect(text_x, y + pad - 3, text_w, th + 2),
         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
     graphics_context_set_text_color(ctx, meta_fg);
     graphics_draw_text(ctx, e->meta, app_font(AF_FOOTER),
-        GRect(text_x, y + pad + th, text_w, mh + 2),
+        GRect(text_x, y + pad + th - 7, text_w, mh + 2),
         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
     // Row divider (skip under a selected/inverted row)
