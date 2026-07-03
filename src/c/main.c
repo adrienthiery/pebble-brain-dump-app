@@ -126,6 +126,11 @@ static int    s_success_dest = DEST_AI;
 static char   s_success_quote[64];
 static AppTimer *s_success_timer = NULL;
 
+// --- Send-failed fallback prompt ("Save as local note?") ---
+static Window *s_fallback_window = NULL;
+static Layer  *s_fallback_canvas = NULL;
+static char    s_fallback_err[STATUS_BUF_SIZE];
+
 // --- Confirm window ---
 static Layer     *s_confirm_canvas_layer;
 static Layer     *s_confirm_divider_layer;
@@ -230,6 +235,7 @@ static void detail_window_push(int idx);
 static void rem_detail_window_push(int display_idx);
 static void merged_rebuild(void);
 static void success_window_push(int dest);
+static void fallback_window_push(const char *err);
 
 // ============================================================================
 // HELPERS
@@ -631,9 +637,9 @@ static void conv_update_display(void) {
     GRect fr = layer_get_frame(scroll_layer_get_layer(s_resp_scroll_layer));
     int content_w = fr.size.w;
     scroll_layer_set_content_size(s_resp_scroll_layer,
-        GSize(content_w, text_size.h + 8));
+        GSize(content_w, text_size.h + 24));
     // Scroll to bottom so latest content is visible
-    int16_t max_scroll = text_size.h + 8 - fr.size.h;
+    int16_t max_scroll = text_size.h + 24 - fr.size.h;
     if (max_scroll < 0) max_scroll = 0;
     s_resp_scroll_offset = max_scroll;
     scroll_layer_set_content_offset(s_resp_scroll_layer,
@@ -786,10 +792,14 @@ static void inbox_received_callback(DictionaryIterator *iter, void *context) {
             success_window_push(dest);
         } else {
             Tuple *err_t = dict_find(iter, MESSAGE_KEY_ERROR_MSG);
-            if (err_t && err_t->value->cstring[0]) {
-                set_status(err_t->value->cstring);
+            const char *emsg = (err_t && err_t->value->cstring[0])
+                             ? err_t->value->cstring : "Error — check phone";
+            // A first-turn send failed — offer to keep the note locally so it
+            // isn't lost. Followups (AI thread) just report the error.
+            if (!s_is_followup && s_note_buf[0]) {
+                fallback_window_push(emsg);
             } else {
-                set_status("Error — check phone");
+                set_status(emsg);
             }
         }
         s_waiting_response = false;
@@ -1372,6 +1382,74 @@ static void success_window_unload(Window *window) {
 }
 
 // ============================================================================
+// SEND-FAILED FALLBACK — a cloud send failed; offer to keep the note locally
+// so it isn't lost. SELECT saves it as a local reminder; BACK discards.
+// ============================================================================
+
+static void fallback_canvas_update(Layer *layer, GContext *ctx) {
+    GRect b = layer_get_bounds(layer);
+    graphics_context_set_fill_color(ctx, C_SCREEN);
+    graphics_fill_rect(ctx, b, 0, GCornerNone);
+    int cw = content_area_w(b) - 8;
+
+    graphics_context_set_text_color(ctx, GColorLightGray);
+    graphics_draw_text(ctx, s_fallback_err, app_font(AF_FOOTER),
+        GRect(4, STATUS_H, cw, b.size.h * 45 / 100),
+        GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
+
+    graphics_context_set_text_color(ctx, C_ON_SCREEN);
+    graphics_draw_text(ctx, "Save as local note?", app_font(AF_BODY),
+        GRect(4, b.size.h * 52 / 100, cw, b.size.h * 45 / 100),
+        GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
+
+    draw_action_bar(ctx, b);
+    int ax = action_bar_icon_x(b);
+    draw_icon_checkmark(ctx, GPoint(ax, btn_select_y(b)), ACTION_ICON_COLOR);
+}
+
+static void fallback_save_click(ClickRecognizerRef rec, void *ctx) {
+    window_stack_pop(true);
+    reminders_add(s_note_buf);
+    set_status("Saved locally ✓");
+    success_window_push(DEST_LOCAL);
+}
+
+static void fallback_dismiss_click(ClickRecognizerRef rec, void *ctx) {
+    window_stack_pop(true);
+    set_status(s_fallback_err);
+}
+
+static void fallback_click_config(void *ctx) {
+    window_single_click_subscribe(BUTTON_ID_SELECT, fallback_save_click);
+    window_single_click_subscribe(BUTTON_ID_BACK,   fallback_dismiss_click);
+}
+
+static void fallback_window_load(Window *window) {
+    Layer *root = window_get_root_layer(window);
+    window_set_background_color(window, C_SCREEN);
+    s_fallback_canvas = layer_create(layer_get_bounds(root));
+    layer_set_update_proc(s_fallback_canvas, fallback_canvas_update);
+    layer_add_child(root, s_fallback_canvas);
+    window_set_click_config_provider(window, fallback_click_config);
+}
+
+static void fallback_window_unload(Window *window) {
+    if (s_fallback_canvas) { layer_destroy(s_fallback_canvas); s_fallback_canvas = NULL; }
+}
+
+static void fallback_window_push(const char *err) {
+    strncpy(s_fallback_err, (err && err[0]) ? err : "Send failed", sizeof(s_fallback_err) - 1);
+    s_fallback_err[sizeof(s_fallback_err) - 1] = '\0';
+    if (s_fallback_window) { window_destroy(s_fallback_window); s_fallback_window = NULL; }
+    s_fallback_window = window_create();
+    window_set_window_handlers(s_fallback_window, (WindowHandlers) {
+        .load   = fallback_window_load,
+        .unload = fallback_window_unload,
+    });
+    window_stack_push(s_fallback_window, true);
+}
+
+// ============================================================================
 // HOME WINDOW
 // ============================================================================
 
@@ -1487,16 +1565,21 @@ static void home_window_load(Window *window) {
 #else
     int text_w = content_w;
 #endif
-    int hero_h = app_font_h(AF_TITLE) + 4;
+    // Two lines tall so long status messages ("Waiting for answer…") wrap
+    // instead of truncating. READY still sits on the first line; meta tucks
+    // right under it (status messages clear the meta line, which is then empty).
+    int hero_line = app_font_h(AF_TITLE);
+    int hero_h = hero_line * 2 + 4;
     s_hero_layer = text_layer_create(GRect(0, hero_y, text_w, hero_h));
     text_layer_set_background_color(s_hero_layer, GColorClear);
     text_layer_set_text_color(s_hero_layer, C_ON_SCREEN);
     text_layer_set_font(s_hero_layer, app_font(AF_TITLE));
     text_layer_set_text_alignment(s_hero_layer, GTextAlignmentCenter);
+    text_layer_set_overflow_mode(s_hero_layer, GTextOverflowModeWordWrap);
     text_layer_set_text(s_hero_layer, "READY");
     layer_add_child(root, text_layer_get_layer(s_hero_layer));
 
-    s_meta_layer = text_layer_create(GRect(0, hero_y + hero_h, text_w, app_font_h(AF_FOOTER) + 4));
+    s_meta_layer = text_layer_create(GRect(0, hero_y + hero_line + 2, text_w, app_font_h(AF_FOOTER) + 4));
     text_layer_set_background_color(s_meta_layer, GColorClear);
     text_layer_set_text_color(s_meta_layer, GColorLightGray);
     text_layer_set_font(s_meta_layer, app_font(AF_FOOTER));
@@ -1623,7 +1706,7 @@ static void response_window_load(Window *window) {
     // Set content size to fit text
     GSize text_size = text_layer_get_content_size(s_resp_content_layer);
     scroll_layer_set_content_size(s_resp_scroll_layer,
-        GSize(content_w_inner, text_size.h + 8));
+        GSize(content_w_inner, text_size.h + 24));
 
     window_set_click_config_provider(window, resp_click_config);
     s_response_open = true;
@@ -1739,7 +1822,7 @@ static void detail_window_load(Window *window) {
 
     GSize ts = text_layer_get_content_size(s_detail_content_layer);
     scroll_layer_set_content_size(s_detail_scroll_layer,
-        GSize(inner_w, ts.h + 8));
+        GSize(inner_w, ts.h + 24));
 
     window_set_click_config_provider(window, detail_click_config);
 }
@@ -2123,7 +2206,7 @@ static void rem_detail_window_load(Window *window) {
                            text_layer_get_layer(s_rem_detail_content));
 
     GSize ts = text_layer_get_content_size(s_rem_detail_content);
-    scroll_layer_set_content_size(s_rem_detail_scroll, GSize(inner_w, ts.h + 8));
+    scroll_layer_set_content_size(s_rem_detail_scroll, GSize(inner_w, ts.h + 24));
 
     window_set_click_config_provider(window, rem_detail_click_config);
 }
@@ -2307,6 +2390,7 @@ static void deinit(void) {
         s_dictation_session = NULL;
     }
     if (s_brain_bmp)         { gbitmap_destroy(s_brain_bmp); s_brain_bmp = NULL; }
+    if (s_fallback_window)   { window_destroy(s_fallback_window);   }
     if (s_success_window)    { window_destroy(s_success_window);    }
     if (s_rem_detail_window) { window_destroy(s_rem_detail_window); }
     if (s_detail_window)     { window_destroy(s_detail_window);     }
