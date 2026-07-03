@@ -1520,9 +1520,44 @@ static void home_up_click(ClickRecognizerRef rec, void *ctx) {
 }
 
 #ifdef DEBUG_SEED
-static void home_debug_success_click(ClickRecognizerRef rec, void *ctx) {
+// Screen gallery — DOWN on home cycles through every screen (incl. the error
+// prompt) for visual verification. Order is announced by the on-screen content.
+#define DEBUG_GALLERY_N 10
+static int s_gallery_idx = 0;
+
+static void debug_gallery_show(int i) {
+    // Pushes on top of home; the caller returns to home (BACK) between steps.
     strncpy(s_note_buf, "Buy oat milk tomorrow at 9am", NOTE_BUF_SIZE - 1);
-    confirm_window_push();   // review screen (target/due prefilled in load)
+    s_note_buf[NOTE_BUF_SIZE - 1] = '\0';
+    switch (i) {
+        case 0: set_status("Waiting for answer from the assistant to your question"); break;
+        case 1: confirm_window_push(); break;                 // review / confirm
+        case 2: success_window_push(DEST_NOTION); break;      // success — letter tile
+        case 3: success_window_push(DEST_AI); break;          // success — sparkle tile
+        case 4: success_window_push(DEST_LOCAL); break;       // success — lines tile
+        case 5: fallback_window_push("Nextcloud Tasks: list not found on the server"); break;
+        case 6:                                               // AI discussion (scrollable)
+            conv_start("How should I structure a Q3 planning deck for the exec team?");
+            conv_set_response("A clean structure:\n\n"
+                "1. Executive summary — the ask up front.\n"
+                "2. Where we are — metrics vs targets.\n"
+                "3. What we learned last quarter.\n"
+                "4. The plan — 3 bets, each with owner + timeline.\n"
+                "5. Resourcing and risks.\n"
+                "6. The ask — decision needed today.\n\n"
+                "Keep it to 8 slides; detail goes in an appendix.");
+            s_in_ai_thread = true;
+            response_window_push();
+            break;
+        case 7: history_window_push(); break;                 // history (populated)
+        case 8: detail_window_push(0); break;                 // history detail
+        case 9: rem_detail_window_push(0); break;             // reminder detail
+    }
+}
+
+static void home_debug_success_click(ClickRecognizerRef rec, void *ctx) {
+    debug_gallery_show(s_gallery_idx);
+    s_gallery_idx = (s_gallery_idx + 1) % DEBUG_GALLERY_N;
 }
 #endif
 
