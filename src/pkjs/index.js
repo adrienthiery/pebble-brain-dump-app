@@ -1543,10 +1543,11 @@ function openSettings() {
 
     '<h3>Routing</h3>' +
     '<div class="section">' +
-    '<label><input type="checkbox" id="routing_auto" ' + chk(cfg.routing_auto !== false) + '>' +
-    '<span>Smart routing (NLP)</span></label>' +
+    '<label><input type="checkbox" id="disable_smart_routing" ' + chk(cfg.routing_auto === false) + ' onchange="updateRoutingUI()">' +
+    '<span>Disable smart routing</span></label>' +
+    '<p class="note">Off: notes are routed by their content (keywords/NLP). On: every note goes to the default destination below; other services are ignored (shown dimmed).</p>' +
     '<label>Default destination:' +
-    '<select id="default_dest">' +
+    '<select id="default_dest" onchange="updateRoutingUI()">' +
     '<option value="local"   ' + sel(cfg.default_dest || 'local','local')   + '>Local Reminders (on-watch)</option>' +
     '<option value="tasks"   ' + sel(cfg.default_dest,'tasks')   + '>Google Tasks</option>' +
     '<option value="todoist" ' + sel(cfg.default_dest,'todoist') + '>Todoist</option>' +
@@ -1559,7 +1560,7 @@ function openSettings() {
     '</div>' +
 
     // ---- Google Tasks ----
-    '<div class="section">' +
+    '<div class="section" id="sec_tasks">' +
     '<label class="toggle-label"><input type="checkbox" id="tasks_enabled" ' + chk(cfg.tasks_enabled) + '>' +
     ' Google Tasks</label>' +
     '<div class="fields">' +
@@ -1596,7 +1597,7 @@ function openSettings() {
     '</div></div>' +
 
     // ---- Todoist ----
-    '<div class="section">' +
+    '<div class="section" id="sec_todoist">' +
     '<label class="toggle-label"><input type="checkbox" id="todoist_enabled" ' + chk(cfg.todoist_enabled) + '>' +
     ' Todoist</label>' +
     '<div class="fields">' +
@@ -1612,7 +1613,7 @@ function openSettings() {
     '</div></div>' +
 
     // ---- Notion ----
-    '<div class="section">' +
+    '<div class="section" id="sec_notion">' +
     '<label class="toggle-label"><input type="checkbox" id="notion_enabled" ' + chk(cfg.notion_enabled) + '>' +
     ' Notion</label>' +
     '<div class="fields">' +
@@ -1629,7 +1630,7 @@ function openSettings() {
     '</div></div>' +
 
     // ---- Nextcloud Notes ----
-    '<div class="section">' +
+    '<div class="section" id="sec_nextcloud">' +
     '<label class="toggle-label"><input type="checkbox" id="nextcloud_enabled" ' + chk(cfg.nextcloud_enabled) + '>' +
     ' Nextcloud Notes</label>' +
     '<div class="fields">' +
@@ -1643,7 +1644,7 @@ function openSettings() {
     '</div></div>' +
 
     // ---- Nextcloud Tasks (CalDAV) ----
-    '<div class="section">' +
+    '<div class="section" id="sec_nextcloud_tasks">' +
     '<label class="toggle-label"><input type="checkbox" id="nextcloud_tasks_enabled" ' + chk(cfg.nextcloud_tasks_enabled) + '>' +
     ' Nextcloud Tasks</label>' +
     '<div class="fields">' +
@@ -1658,7 +1659,7 @@ function openSettings() {
     '</div></div>' +
 
     // ---- AI Agent ----
-    '<div class="section">' +
+    '<div class="section" id="sec_ai">' +
     '<label class="toggle-label"><input type="checkbox" id="ai_enabled" ' + chk(cfg.ai_enabled) + '>' +
     ' AI Agent</label>' +
     '<div class="fields">' +
@@ -1684,7 +1685,7 @@ function openSettings() {
     '</div></div>' +
 
     // ---- Webhook ----
-    '<div class="section">' +
+    '<div class="section" id="sec_webhook">' +
     '<label class="toggle-label"><input type="checkbox" id="webhook_enabled" ' + chk(cfg.webhook_enabled) + '>' +
     ' Custom Webhook</label>' +
     '<div class="fields">' +
@@ -1786,12 +1787,24 @@ function openSettings() {
       '}' +
       'fetchPage(null);' +
     '}' +
+    // Dim non-default destination sections when smart routing is disabled.
+    'function updateRoutingUI(){' +
+      'var off=document.getElementById("disable_smart_routing").checked;' +
+      'var def=document.getElementById("default_dest").value;' +
+      '["tasks","todoist","notion","nextcloud","nextcloud_tasks","ai","webhook"].forEach(function(d){' +
+        'var el=document.getElementById("sec_"+d);if(!el)return;' +
+        'var dim=off&&d!==def;' +
+        'el.style.opacity=dim?"0.5":"";' +
+        'el.style.pointerEvents=dim?"none":"";' +
+      '});' +
+    '}' +
     'window.addEventListener("load",function(){' +
       'var tok=document.getElementById("tasks_access_token").value;' +
       'if(tok)fetchTaskLists(tok);' +
       'else document.getElementById("tasks_list_id").innerHTML=\'<option value="">Default list</option>\';' +
       'var tdTok=document.getElementById("todoist_token").value;' +
       'if(tdTok)fetchTodoistProjects(tdTok);' +
+      'updateRoutingUI();' +
     '});' +
     'function copyAuthUrl(){' +
       'var el=document.getElementById("tasks_auth_url");' +
@@ -1850,7 +1863,7 @@ function openSettings() {
     'function buildCfg(){' +
     'return {' +
     'metric_units:document.getElementById("metric_units").checked,' +
-    'routing_auto:document.getElementById("routing_auto").checked,' +
+    'routing_auto:!document.getElementById("disable_smart_routing").checked,' +
     'default_dest:document.getElementById("default_dest").value,' +
     'tasks_enabled:document.getElementById("tasks_enabled").checked,' +
     'tasks_access_token:document.getElementById("tasks_access_token").value,' +
