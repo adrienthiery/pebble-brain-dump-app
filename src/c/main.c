@@ -1313,7 +1313,7 @@ static void success_canvas_update(Layer *layer, GContext *ctx) {
     graphics_context_set_stroke_color(ctx, C_ON_SCREEN);
     graphics_context_set_stroke_width(ctx, 2);
     graphics_draw_circle(ctx, GPoint(w / 2, med_cy), med_r);
-    draw_check_big(ctx, GPoint(w / 2, med_cy + 3), med_r, C_ON_SCREEN);
+    draw_check_big(ctx, GPoint(w / 2, med_cy + 2), med_r, C_ON_SCREEN);
 
     // Title "DUMPED"
     graphics_context_set_text_color(ctx, C_ON_SCREEN);
