@@ -1218,35 +1218,40 @@ function stripDateTimeFromText(text) {
 
 var DEST_INDEX = { tasks: 0, notion: 1, ai: 2, webhook: 3, local: 4, todoist: 5, nextcloud: 6, nextcloud_tasks: 7 };
 
+// Single source of truth for destination selection, used by BOTH the confirm
+// preview (classify-only) and the real send — so the "→ X" shown on the review
+// screen is always where the note actually goes. Honours routing_auto: when it
+// is off, the default destination wins even if a keyword would match.
+function pickDest(text, enabled, cfg, isFollowup) {
+    if (isFollowup) return 'ai';
+    if (enabled.length === 0) return 'local';
+    var defaultDest = cfg.default_dest || 'local';
+    var dest = (cfg.routing_auto !== false)
+        ? classifyIntent(text, enabled, cfg)
+        : defaultDest;
+    if (!dest) dest = defaultDest;
+    // Task/reminder signals must never go to AI — redirect to a task service or local.
+    if (dest === 'ai' && isTaskLike(text)) {
+        if      (enabled.indexOf('tasks')   >= 0) dest = 'tasks';
+        else if (enabled.indexOf('todoist') >= 0) dest = 'todoist';
+        else if (enabled.indexOf('nextcloud_tasks') >= 0) dest = 'nextcloud_tasks';
+        else dest = 'local';
+    }
+    return dest;
+}
+
 function routeAndSend(text, isFollowup) {
     var cfg     = getConfig();
     var enabled = getEnabledDests(cfg);
 
-    // Default destination (used when routing_auto is off, or no cloud services enabled)
-    var defaultDest = cfg.default_dest || 'local';
-
-    // If no cloud services are configured and default is not local, go local
+    // If no cloud services are configured, go local.
     if (enabled.length === 0 && !isFollowup) {
         sendToWatch({ ROUTING_DONE: 4 });
         sendToWatch({ CONFIRM: 1, DEST_USED: 4 });
         return;
     }
 
-    var dest = isFollowup ? 'ai'
-             : (cfg.routing_auto !== false)
-               ? classifyIntent(text, enabled, cfg)
-               : defaultDest;
-
-    // classifyIntent may return cfg.default_dest when no signal — honour 'local'
-    if (!dest) dest = defaultDest;
-
-    // Task/reminder signals must never go to AI — redirect to a task service or local
-    if (dest === 'ai' && !isFollowup && isTaskLike(text)) {
-        if      (enabled.indexOf('tasks')   >= 0) dest = 'tasks';
-        else if (enabled.indexOf('todoist') >= 0) dest = 'todoist';
-        else if (enabled.indexOf('nextcloud_tasks') >= 0) dest = 'nextcloud_tasks';
-        else dest = 'local';
-    }
+    var dest = pickDest(text, enabled, cfg, isFollowup);
 
     var di = DEST_INDEX[dest] !== undefined ? DEST_INDEX[dest] : 4;
     console.log('Brain Dump route: "' + text.substring(0, 40) + '..." → ' + dest);
@@ -1394,17 +1399,11 @@ Pebble.addEventListener('appmessage', function(e) {
     if (p.NOTE_TEXT !== undefined) {
         s_last_note = p.NOTE_TEXT;
         if (p.NOTE_IS_CLASSIFY_ONLY) {
-            // Classify only — tell watch the predicted destination without routing
+            // Classify only — predict the destination the real send will use, so
+            // the review screen's "→ X" matches where the note actually goes.
             var cfg2 = getConfig();
             var enabled2 = getEnabledDests(cfg2);
-            var dest2 = (enabled2.length === 0) ? 'local'
-                      : classifyIntent(p.NOTE_TEXT, enabled2, cfg2) || cfg2.default_dest || enabled2[0];
-            if (dest2 === 'ai' && isTaskLike(p.NOTE_TEXT)) {
-                if      (enabled2.indexOf('tasks')   >= 0) dest2 = 'tasks';
-                else if (enabled2.indexOf('todoist') >= 0) dest2 = 'todoist';
-                else if (enabled2.indexOf('nextcloud_tasks') >= 0) dest2 = 'nextcloud_tasks';
-                else dest2 = 'local';
-            }
+            var dest2 = pickDest(p.NOTE_TEXT, enabled2, cfg2, false);
             var msg2 = { ROUTING_DONE: DEST_INDEX[dest2] !== undefined ? DEST_INDEX[dest2] : 4 };
             // Surface an extracted due date/time for task destinations.
             if (dest2 === 'tasks' || dest2 === 'todoist' || dest2 === 'nextcloud_tasks') {
