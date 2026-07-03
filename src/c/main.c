@@ -1072,13 +1072,14 @@ static void draw_glyph_lines(GContext *ctx, GPoint c, GColor fg) {
     graphics_draw_line(ctx, GPoint(c.x - 5, c.y + 4), GPoint(c.x + 1, c.y + 4));
 }
 
-// Draw a single letter monogram centered at c, in fg color.
+// Draw a single letter monogram centered at c, in fg color. The rect top is
+// raised (Pebble text has top leading) so the glyph is optically centered.
 static void draw_glyph_letter(GContext *ctx, char letter, GPoint c, GColor fg) {
     char ch[2] = { letter, '\0' };
     GFont font = fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD);
     graphics_context_set_text_color(ctx, fg);
     graphics_draw_text(ctx, ch, font,
-        GRect(c.x - 9, c.y - 10, 18, 18),
+        GRect(c.x - 9, c.y - 13, 18, 18),
         GTextOverflowModeFill, GTextAlignmentCenter, NULL);
 }
 
@@ -1330,8 +1331,10 @@ static void success_canvas_update(Layer *layer, GContext *ctx) {
     int chip_cy = h * 62 / 100 + y_shift + dumped_gap;
     draw_dest_tile(ctx, s_success_dest, GPoint(gx + tile / 2, chip_cy), tile, C_ON_SCREEN);
     graphics_context_set_text_color(ctx, C_ON_SCREEN);
+    // Nudge up: Pebble text renders with top leading, so a rect-centered line
+    // sits visually low against the geometrically-centered tile.
     graphics_draw_text(ctx, name, chip_font,
-        GRect(gx + tile + gap, chip_cy - chip_h / 2, ns.w + 4, chip_h),
+        GRect(gx + tile + gap, chip_cy - chip_h / 2 - chip_h / 5, ns.w + 4, chip_h + 4),
         GTextOverflowModeFill, GTextAlignmentLeft, NULL);
 
     // Two-way webhook reply (if any) replaces the transcript quote — the
@@ -1406,12 +1409,13 @@ static void fallback_canvas_update(Layer *layer, GContext *ctx) {
     int hint_h = app_font_h(AF_HEADER);
     int hint_y = b.size.h - CONFIRM_BOTTOM_PAD - hint_h;
 
-    // Error message (body-size), prefixed. Fills the space above the hint.
-    char disp[STATUS_BUF_SIZE + 24];
-    snprintf(disp, sizeof(disp), "Error encountered: %s", s_fallback_err);
+    // Error message, prefixed. HEADER size — bigger than a caption but small
+    // enough that a typical error fits without being cut.
+    char disp[STATUS_BUF_SIZE + 12];
+    snprintf(disp, sizeof(disp), "Error: %s", s_fallback_err);
     int content_top = STATUS_H + 4;
     graphics_context_set_text_color(ctx, C_ON_SCREEN);
-    graphics_draw_text(ctx, disp, app_font(AF_BODY),
+    graphics_draw_text(ctx, disp, app_font(AF_HEADER),
         GRect(4, content_top, content_w, hint_y - 6 - content_top),
         GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
 
