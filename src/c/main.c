@@ -1390,18 +1390,37 @@ static void fallback_canvas_update(Layer *layer, GContext *ctx) {
     GRect b = layer_get_bounds(layer);
     graphics_context_set_fill_color(ctx, C_SCREEN);
     graphics_fill_rect(ctx, b, 0, GCornerNone);
-    int cw = content_area_w(b) - 8;
+    int content_w = content_area_w(b) - 8;
 
-    graphics_context_set_text_color(ctx, GColorLightGray);
-    graphics_draw_text(ctx, s_fallback_err, app_font(AF_FOOTER),
-        GRect(4, STATUS_H, cw, b.size.h * 45 / 100),
+    // Status bar — title + clock + divider, same chrome as the review screen.
+    graphics_context_set_text_color(ctx, C_ON_SCREEN);
+    graphics_draw_text(ctx, "FAILED", app_font(AF_STATUS),
+        GRect(STATUS_TITLE_X, 1, STATUS_HDR_TITLE_W(content_area_w(b)), STATUS_H),
+        GTextOverflowModeFill, GTextAlignmentLeft, NULL);
+#ifndef PBL_ROUND
+    draw_status_clock_on_bar(ctx, b);
+#endif
+    draw_status_divider(ctx, b);
+
+    // Bottom hint "→ Local note?", positioned like the review screen's target.
+    int hint_h = app_font_h(AF_HEADER);
+    int hint_y = b.size.h - CONFIRM_BOTTOM_PAD - hint_h;
+
+    // Error message (body-size), prefixed. Fills the space above the hint.
+    char disp[STATUS_BUF_SIZE + 24];
+    snprintf(disp, sizeof(disp), "Error encountered: %s", s_fallback_err);
+    int content_top = STATUS_H + 4;
+    graphics_context_set_text_color(ctx, C_ON_SCREEN);
+    graphics_draw_text(ctx, disp, app_font(AF_BODY),
+        GRect(4, content_top, content_w, hint_y - 6 - content_top),
         GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
 
     graphics_context_set_text_color(ctx, C_ON_SCREEN);
-    graphics_draw_text(ctx, "Save as local note?", app_font(AF_BODY),
-        GRect(4, b.size.h * 52 / 100, cw, b.size.h * 45 / 100),
-        GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
+    graphics_draw_text(ctx, "\xe2\x86\x92 Local note?", app_font(AF_HEADER),
+        GRect(4, hint_y, content_w, hint_h + 2),
+        GTextOverflowModeFill, GTextAlignmentLeft, NULL);
 
+    // Action bar — checkmark = save (SELECT); back dismisses.
     draw_action_bar(ctx, b);
     int ax = action_bar_icon_x(b);
     draw_icon_checkmark(ctx, GPoint(ax, btn_select_y(b)), ACTION_ICON_COLOR);
