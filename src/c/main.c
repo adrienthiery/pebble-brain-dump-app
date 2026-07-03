@@ -1046,6 +1046,7 @@ static void draw_icon_checkmark(GContext *ctx, GPoint c, GColor color) {
 
 // Sparkle / 4-point star — AI route
 static void draw_glyph_sparkle(GContext *ctx, GPoint c, GColor fg) {
+    c.y -= 1;   // optically sits a touch low otherwise
     graphics_context_set_stroke_color(ctx, fg);
     graphics_context_set_stroke_width(ctx, 2);
     graphics_draw_line(ctx, GPoint(c.x, c.y - 5), GPoint(c.x, c.y + 5));
@@ -1065,6 +1066,7 @@ static void draw_glyph_check(GContext *ctx, GPoint c, GColor fg) {
 
 // Three stacked lines — local Note
 static void draw_glyph_lines(GContext *ctx, GPoint c, GColor fg) {
+    c.y -= 1;   // optically sits a touch low otherwise
     graphics_context_set_stroke_color(ctx, fg);
     graphics_context_set_stroke_width(ctx, 1);
     graphics_draw_line(ctx, GPoint(c.x - 5, c.y - 4), GPoint(c.x + 5, c.y - 4));
@@ -1079,7 +1081,7 @@ static void draw_glyph_letter(GContext *ctx, char letter, GPoint c, GColor fg) {
     GFont font = fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD);
     graphics_context_set_text_color(ctx, fg);
     graphics_draw_text(ctx, ch, font,
-        GRect(c.x - 9, c.y - 11, 18, 18),
+        GRect(c.x - 9, c.y - 9, 18, 18),
         GTextOverflowModeFill, GTextAlignmentCenter, NULL);
 }
 
@@ -1334,7 +1336,7 @@ static void success_canvas_update(Layer *layer, GContext *ctx) {
     // Nudge up: Pebble text renders with top leading, so a rect-centered line
     // sits visually low against the geometrically-centered tile.
     graphics_draw_text(ctx, name, chip_font,
-        GRect(gx + tile + gap, chip_cy - chip_h / 2 - chip_h / 5, ns.w + 4, chip_h + 4),
+        GRect(gx + tile + gap, chip_cy - chip_h / 2 - chip_h / 10, ns.w + 4, chip_h + 4),
         GTextOverflowModeFill, GTextAlignmentLeft, NULL);
 
     // Two-way webhook reply (if any) replaces the transcript quote — the
@@ -1987,11 +1989,11 @@ static void draw_merged_row(GContext *ctx, const MergedEntry *e, int y, int w, b
     // centers on the tile, and pull the meta up to tighten the gap under the title.
     graphics_context_set_text_color(ctx, fg);
     graphics_draw_text(ctx, e->title, app_font(AF_HEADER),
-        GRect(text_x, y + pad - 3, text_w, th + 2),
+        GRect(text_x, y + pad - 1, text_w, th + 2),
         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
     graphics_context_set_text_color(ctx, meta_fg);
     graphics_draw_text(ctx, e->meta, app_font(AF_FOOTER),
-        GRect(text_x, y + pad + th - 7, text_w, mh + 2),
+        GRect(text_x, y + pad + th - 5, text_w, mh + 2),
         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
     // Row divider (skip under a selected/inverted row)
