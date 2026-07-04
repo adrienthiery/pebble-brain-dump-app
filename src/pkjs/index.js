@@ -931,7 +931,9 @@ function sendToTodoist(text, cfg, cb) {
     if (!token) { cb(false, 'Todoist not authenticated'); return; }
 
     var dueDate = extractDueDate(text);
-    var body = { content: dueDate ? stripDateTimeFromText(text) : text };
+    var textContent = dueDate ? stripDateTimeFromText(text) : text;
+    if (cfg.todoist_append) textContent += ' ' + cfg.todoist_append;
+    var body = { content: textContent };
     if (cfg.todoist_project_id) body.project_id = cfg.todoist_project_id;
 
     // Build ISO due date/time
@@ -1608,6 +1610,8 @@ function openSettings() {
     '<button type="button" onclick="fetchTodoistProjects(document.getElementById(\'todoist_token\').value)"' +
     ' style="width:auto;padding:4px 10px;font-size:12px;margin:4px 0 8px">&#8635; Refresh</button>' +
     '<div id="todoist_fetch_error" class="fetch-error"></div>' +
+    'Additional instructions (appended to task):<input type="text" id="todoist_append"' +
+    ' value=\'' + esc(cfg.todoist_append) + '\' placeholder="e.g. Today">' +
     '<br>Routing keywords (comma-separated, added to defaults):<input type="text" id="todoist_keywords"' +
     ' value=\'' + esc(cfg.todoist_keywords) + '\' placeholder="todoist, add to todoist, ...">' +
     '</div></div>' +
@@ -1873,6 +1877,7 @@ function openSettings() {
     'todoist_enabled:document.getElementById("todoist_enabled").checked,' +
     'todoist_token:document.getElementById("todoist_token").value.trim(),' +
     'todoist_project_id:document.getElementById("todoist_project_id").value,' +
+    'todoist_append:document.getElementById("todoist_append").value.trim(),' +
     'todoist_keywords:document.getElementById("todoist_keywords").value.trim(),' +
     'notion_enabled:document.getElementById("notion_enabled").checked,' +
     'notion_token:document.getElementById("notion_token").value.trim(),' +
