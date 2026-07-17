@@ -25,6 +25,9 @@ var DEFAULT_SYSTEM_PROMPT =
 var s_ai_messages  = [];
 var s_last_note    = '';
 var s_clock_24h    = false;   // updated from watch on each note
+// The last failed cloud send, held until the watch reports the user's fallback
+// choice. Queued on "Retry later" (QUEUE_RETRY); dropped otherwise. { text, dest, ts }.
+var s_pending_retry = null;
 
 // ============================================================================
 // CONFIG HELPERS
@@ -1388,9 +1391,14 @@ function routeAndSend(text, isFollowup) {
     function onResult(ok, data) {
         if (!ok) {
             console.log('Send failed: ' + data);
-            // Queue retryable cloud sends so the note isn't lost to a transient
-            // network/API failure; the watch still offers its local fallback.
-            if (QUEUEABLE_DESTS[dest]) enqueueFailed(sendText, dest, ts);
+            // Don't auto-queue. Remember this failed send so the watch's fallback
+            // screen can decide: on "Retry later" (QUEUE_RETRY) the phone queues
+            // it; on "Save to local" the watch keeps it on-watch. Making the two
+            // mutually exclusive avoids the duplicate note the old auto-queue +
+            // local-fallback overlap could produce (#4).
+            s_pending_retry = QUEUEABLE_DESTS[dest]
+                ? { text: sendText, dest: dest, ts: ts }
+                : null;
             var label = DEST_LABEL[dest] || dest;
             var msg = (label + ': ' + (data || 'Unknown error')).substring(0, 45);
             sendToWatch({ CONFIRM: 2, ERROR_MSG: msg });
@@ -1591,6 +1599,16 @@ Pebble.addEventListener('appmessage', function(e) {
     if (p.CLEAR_CONTEXT) {
         s_ai_messages = [];
         console.log('AI context cleared');
+    }
+
+    // User chose "Retry later" on the send-failed fallback screen: queue the
+    // note that just failed so it retries on the next 'ready' or successful send.
+    if (p.QUEUE_RETRY) {
+        if (s_pending_retry) {
+            enqueueFailed(s_pending_retry.text, s_pending_retry.dest, s_pending_retry.ts);
+            console.log('Queued for retry → ' + s_pending_retry.dest);
+            s_pending_retry = null;
+        }
     }
 
     if (p.COMPLETE_TASK && p.EXTERNAL_ID) {

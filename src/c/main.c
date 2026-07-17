@@ -692,6 +692,15 @@ static void appmsg_complete_task(const char *external_id) {
     app_message_outbox_send();
 }
 
+// Tell the phone the user picked "Retry later" on the send-failed fallback, so
+// it queues the note that just failed for a later retry.
+static void appmsg_queue_retry(void) {
+    DictionaryIterator *iter;
+    if (app_message_outbox_begin(&iter) != APP_MSG_OK) return;
+    dict_write_int8(iter, MESSAGE_KEY_QUEUE_RETRY, 1);
+    app_message_outbox_send();
+}
+
 static void route_note(bool is_followup) {
     if (!is_phone_connected()) {
         if (is_followup) {
@@ -1387,8 +1396,10 @@ static void success_window_unload(Window *window) {
 }
 
 // ============================================================================
-// SEND-FAILED FALLBACK — a cloud send failed; offer to keep the note locally
-// so it isn't lost. SELECT saves it as a local reminder; BACK discards.
+// SEND-FAILED FALLBACK — a cloud send failed; offer two ways to keep the note
+// so it isn't lost. UP asks the phone to retry it later (queued phone-side);
+// SELECT saves it as an on-watch local reminder; BACK discards. The two are
+// mutually exclusive, so the note is never both queued and saved locally.
 // ============================================================================
 
 static void fallback_canvas_update(Layer *layer, GContext *ctx) {
@@ -1407,9 +1418,11 @@ static void fallback_canvas_update(Layer *layer, GContext *ctx) {
 #endif
     draw_status_divider(ctx, b);
 
-    // Bottom hint "→ Local note?", positioned like the review screen's target.
-    int hint_h = app_font_h(AF_HEADER);
-    int hint_y = b.size.h - CONFIRM_BOTTOM_PAD - hint_h;
+    // Two stacked choice hints at the bottom, in button order (UP then SELECT),
+    // mirroring the two action-bar icons. BACK discards and needs no label.
+    int hint_h = app_font_h(AF_FOOTER);
+    int hint2_y = b.size.h - CONFIRM_BOTTOM_PAD - hint_h;
+    int hint1_y = hint2_y - hint_h;
 
     // Error message, prefixed. HEADER size — bigger than a caption but small
     // enough that a typical error fits without being cut.
@@ -1418,18 +1431,29 @@ static void fallback_canvas_update(Layer *layer, GContext *ctx) {
     int content_top = STATUS_H + 4;
     graphics_context_set_text_color(ctx, C_ON_SCREEN);
     graphics_draw_text(ctx, disp, app_font(AF_HEADER),
-        GRect(4, content_top, content_w, hint_y - 6 - content_top),
+        GRect(4, content_top, content_w, hint1_y - 6 - content_top),
         GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
 
     graphics_context_set_text_color(ctx, C_ON_SCREEN);
-    graphics_draw_text(ctx, "\xe2\x86\x92 Local note?", app_font(AF_HEADER),
-        GRect(4, hint_y, content_w, hint_h + 2),
+    graphics_draw_text(ctx, "Retry later", app_font(AF_FOOTER),
+        GRect(4, hint1_y, content_w, hint_h + 2),
+        GTextOverflowModeFill, GTextAlignmentLeft, NULL);
+    graphics_draw_text(ctx, "Save local", app_font(AF_FOOTER),
+        GRect(4, hint2_y, content_w, hint_h + 2),
         GTextOverflowModeFill, GTextAlignmentLeft, NULL);
 
-    // Action bar — checkmark = save (SELECT); back dismisses.
+    // Action bar — redo = retry later (UP), local-note glyph = save (SELECT);
+    // back dismisses. Redo icon reused from the dictation confirm screen.
     draw_action_bar(ctx, b);
     int ax = action_bar_icon_x(b);
-    draw_icon_checkmark(ctx, GPoint(ax, btn_select_y(b)), ACTION_ICON_COLOR);
+    draw_icon_redo_review(ctx, GPoint(ax, btn_up_y(b)),     ACTION_ICON_COLOR);
+    draw_glyph_lines     (ctx, GPoint(ax, btn_select_y(b)), ACTION_ICON_COLOR);
+}
+
+static void fallback_retry_click(ClickRecognizerRef rec, void *ctx) {
+    window_stack_pop(true);
+    appmsg_queue_retry();
+    set_status("Queued for retry");
 }
 
 static void fallback_save_click(ClickRecognizerRef rec, void *ctx) {
@@ -1445,6 +1469,7 @@ static void fallback_dismiss_click(ClickRecognizerRef rec, void *ctx) {
 }
 
 static void fallback_click_config(void *ctx) {
+    window_single_click_subscribe(BUTTON_ID_UP,     fallback_retry_click);
     window_single_click_subscribe(BUTTON_ID_SELECT, fallback_save_click);
     window_single_click_subscribe(BUTTON_ID_BACK,   fallback_dismiss_click);
 }
