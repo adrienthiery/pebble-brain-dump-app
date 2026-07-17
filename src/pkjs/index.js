@@ -4,6 +4,12 @@
 
 var KEY_CONFIG  = 'brain_dump_cfg_v1';
 var KEY_HISTORY = 'brain_dump_hist_v1';
+var KEY_QUEUE   = 'brain_dump_queue_v1';
+
+// Retry queue bounds: drop an item after this many failed attempts, and never
+// let the queue grow past this many entries (oldest dropped first).
+var MAX_QUEUE_RETRIES = 5;
+var MAX_QUEUE_LEN     = 10;
 
 var TASKS_CLIENT_ID = '122599459809-1egpb0mrc97lpeh6fshnfv1i1drnvnkd.apps.googleusercontent.com';
 // secrets.js is gitignored; secrets.example.js is the committed placeholder.
@@ -19,6 +25,9 @@ var DEFAULT_SYSTEM_PROMPT =
 var s_ai_messages  = [];
 var s_last_note    = '';
 var s_clock_24h    = false;   // updated from watch on each note
+// The last failed cloud send, held until the watch reports the user's fallback
+// choice. Queued on "Retry later" (QUEUE_RETRY); dropped otherwise. { text, dest, ts }.
+var s_pending_retry = null;
 
 // ============================================================================
 // CONFIG HELPERS
@@ -46,6 +55,46 @@ function addHistory(text, dest) {
                 ts: Math.floor(Date.now() / 1000) });
     if (h.length > 50) h = h.slice(0, 50);
     try { localStorage.setItem(KEY_HISTORY, JSON.stringify(h)); } catch(e) {}
+}
+
+// ============================================================================
+// RETRY QUEUE  (failed sends, persisted phone-side)
+// ============================================================================
+// When a note is transcribed but delivery to its destination fails (network
+// drop, API error, rate limit), it is queued here instead of dead-ending in
+// the on-watch fallback. The queue is FIFO and flushed on 'ready' and after
+// any successful send. Entries: { text, dest, ts, tries }.
+
+function getQueue() {
+    try { var r = localStorage.getItem(KEY_QUEUE); return r ? JSON.parse(r) : []; }
+    catch(e) { return []; }
+}
+function saveQueue(q) {
+    try { localStorage.setItem(KEY_QUEUE, JSON.stringify(q)); } catch(e) {}
+}
+
+// Append a failed send, preserving its original dictation timestamp. Oldest
+// entries are dropped once the queue is full so it can't grow without bound.
+function enqueueFailed(text, dest, ts) {
+    var q = getQueue();
+    q.push({ text: text, dest: dest, ts: ts, tries: 0 });
+    if (q.length > MAX_QUEUE_LEN) q = q.slice(q.length - MAX_QUEUE_LEN);
+    saveQueue(q);
+}
+
+// Advance the queue after a delivery attempt on its head item. The head is
+// shifted off in all cases; on failure its retry counter grows and it is
+// re-appended at the tail unless it has exhausted the cap (then it is dropped).
+// Re-appending means a permanently failing item cycles to the back instead of
+// head-blocking the rest of the queue. Pure — the caller reads/writes storage —
+// so it stays easy to unit-test.
+function queueAfterResult(q, ok) {
+    if (!q.length) return q;
+    var item = q.shift();
+    if (ok) return q;
+    item.tries = (item.tries || 0) + 1;
+    if (item.tries < MAX_QUEUE_RETRIES) q.push(item);
+    return q;
 }
 
 // ============================================================================
@@ -1270,6 +1319,25 @@ function stripDateTimeFromText(text) {
 
 var DEST_INDEX = { tasks: 0, notion: 1, ai: 2, webhook: 3, local: 4, todoist: 5, nextcloud: 6, nextcloud_tasks: 7 };
 
+// Destinations whose delivery is a one-shot HTTP send that can be safely
+// retried later. 'ai' (a live conversation) and 'local' (saved on-watch) are
+// intentionally excluded from the retry queue.
+var QUEUEABLE_DESTS = { tasks: 1, notion: 1, webhook: 1, todoist: 1, nextcloud: 1, nextcloud_tasks: 1 };
+
+// Dispatch a note to a single cloud destination. Shared by the live router and
+// the retry-queue flush so both take exactly the same delivery path.
+function sendToDest(dest, text, cfg, cb) {
+    switch (dest) {
+        case 'tasks':           sendToTasks         (text, cfg, cb); break;
+        case 'notion':          sendToNotion        (text, cfg, cb); break;
+        case 'webhook':         sendToWebhook       (text, cfg, cb); break;
+        case 'todoist':         sendToTodoist       (text, cfg, cb); break;
+        case 'nextcloud':       sendToNextcloud     (text, cfg, cb); break;
+        case 'nextcloud_tasks': sendToNextcloudTasks(text, cfg, cb); break;
+        default:                cb(false, 'Unknown destination');
+    }
+}
+
 // Single source of truth for destination selection, used by BOTH the confirm
 // preview (classify-only) and the real send — so the "→ X" shown on the review
 // screen is always where the note actually goes. Honours routing_auto: when it
@@ -1295,6 +1363,9 @@ function pickDest(text, enabled, cfg, isFollowup) {
 function routeAndSend(text, isFollowup) {
     var cfg     = getConfig();
     var enabled = getEnabledDests(cfg);
+    // Captured once so a failed send keeps the note's original dictation time
+    // when it is queued for retry, matching how addHistory stamps notes.
+    var ts = Math.floor(Date.now() / 1000);
 
     // If no cloud services are configured, go local.
     if (enabled.length === 0 && !isFollowup) {
@@ -1320,12 +1391,22 @@ function routeAndSend(text, isFollowup) {
     function onResult(ok, data) {
         if (!ok) {
             console.log('Send failed: ' + data);
+            // Don't auto-queue. Remember this failed send so the watch's fallback
+            // screen can decide: on "Retry later" (QUEUE_RETRY) the phone queues
+            // it; on "Save to local" the watch keeps it on-watch. Making the two
+            // mutually exclusive avoids the duplicate note the old auto-queue +
+            // local-fallback overlap could produce (#4).
+            s_pending_retry = QUEUEABLE_DESTS[dest]
+                ? { text: sendText, dest: dest, ts: ts }
+                : null;
             var label = DEST_LABEL[dest] || dest;
             var msg = (label + ': ' + (data || 'Unknown error')).substring(0, 45);
             sendToWatch({ CONFIRM: 2, ERROR_MSG: msg });
             return;
         }
         addHistory(sendText, di);
+        // A live send just succeeded → the network is up, so drain any backlog.
+        flushQueue();
         if (dest === 'ai') {
             sendToWatch({ AI_RESPONSE: data, AI_RESPONSE_DONE: 1, DEST_USED: di });
         } else if (dest === 'webhook' && data !== 'webhook') {
@@ -1342,16 +1423,60 @@ function routeAndSend(text, isFollowup) {
     }
 
     switch (dest) {
-        case 'tasks':     sendToTasks     (sendText, cfg, onResult); break;
-        case 'notion':    sendToNotion    (sendText, cfg, onResult); break;
-        case 'ai':        sendToAI        (sendText, isFollowup, cfg, onResult); break;
-        case 'webhook':   sendToWebhook   (sendText, cfg, onResult); break;
-        case 'todoist':   sendToTodoist   (sendText, cfg, onResult); break;
-        case 'nextcloud': sendToNextcloud (sendText, cfg, onResult); break;
-        case 'nextcloud_tasks': sendToNextcloudTasks(sendText, cfg, onResult); break;
-        case 'local':     onResult(true, 'local'); break;  // saved on-watch from s_note_buf
-        default:          sendToWatch({ CONFIRM: 2 });
+        case 'ai':    sendToAI(sendText, isFollowup, cfg, onResult); break;
+        case 'local': onResult(true, 'local'); break;  // saved on-watch from s_note_buf
+        default:      sendToDest(dest, sendText, cfg, onResult);
     }
+}
+
+// Try to deliver queued notes oldest-first. Runs on the PebbleKit JS 'ready'
+// event and after any successful send. Serialized via s_flushing.
+//
+// Failures are tracked per-destination, not globally: when a send to a
+// destination fails, that destination is marked down for the rest of this pass
+// and its items are skipped, but items bound for other destinations still get a
+// try. So a webhook being down no longer blocks queued Notion notes. The pass
+// ends only once every remaining item is bound for a destination that already
+// failed this pass; the next trigger starts a fresh pass.
+var s_flushing = false;
+function flushQueue() {
+    if (s_flushing) return;
+    if (getQueue().length === 0) return;
+    s_flushing = true;
+    flushStep(getConfig(), {}, 0);
+}
+
+// One step of a flush pass. `down` is the set of destinations that have already
+// failed this pass. `rotated` counts how many heads we have skipped in a row
+// without a real send attempt — once it reaches the queue length, every
+// remaining item is bound for a down destination and the pass is over.
+function flushStep(cfg, down, rotated) {
+    var q = getQueue();
+    if (q.length === 0) { s_flushing = false; return; }
+
+    // Head is bound for a destination already known down this pass: rotate it to
+    // the tail (no retry charged) and move on to the next distinct destination.
+    if (down[q[0].dest]) {
+        if (rotated >= q.length) { s_flushing = false; return; }
+        q.push(q.shift());
+        saveQueue(q);
+        flushStep(cfg, down, rotated + 1);
+        return;
+    }
+
+    var item = q[0];
+    sendToDest(item.dest, item.text, cfg, function(ok, data) {
+        saveQueue(queueAfterResult(getQueue(), ok));
+        if (ok) {
+            var di = DEST_INDEX[item.dest] !== undefined ? DEST_INDEX[item.dest] : 4;
+            addHistory(item.text, di);
+            console.log('Retried queued note → ' + item.dest);
+        } else {
+            down[item.dest] = 1;   // this destination is down — skip it this pass
+            console.log('Queued note still failing (' + item.dest + '): ' + data);
+        }
+        flushStep(cfg, down, 0);   // real attempt made — reset the skip counter
+    });
 }
 
 // AppMessage allows only one message in flight; a second sendAppMessage before
@@ -1400,6 +1525,9 @@ Pebble.addEventListener('ready', function() {
     console.log('Brain Dump JS ready');
     var cfg     = getConfig();
     sendToWatch({ DEST_MASK: computeDestMask(cfg) });
+
+    // Retry any sends that failed while the phone was offline / the API was down.
+    flushQueue();
 
     // Proactively refresh Google access token so it's always fresh before use.
     // Access tokens expire after 1 hour; refreshing on every connect keeps them valid.
@@ -1471,6 +1599,16 @@ Pebble.addEventListener('appmessage', function(e) {
     if (p.CLEAR_CONTEXT) {
         s_ai_messages = [];
         console.log('AI context cleared');
+    }
+
+    // User chose "Retry later" on the send-failed fallback screen: queue the
+    // note that just failed so it retries on the next 'ready' or successful send.
+    if (p.QUEUE_RETRY) {
+        if (s_pending_retry) {
+            enqueueFailed(s_pending_retry.text, s_pending_retry.dest, s_pending_retry.ts);
+            console.log('Queued for retry → ' + s_pending_retry.dest);
+            s_pending_retry = null;
+        }
     }
 
     if (p.COMPLETE_TASK && p.EXTERNAL_ID) {

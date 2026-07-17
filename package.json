@@ -48,7 +48,8 @@
       "DUE_LABEL",
       "EXTERNAL_ID",
       "COMPLETE_TASK",
-      "WEBHOOK_MSG"
+      "WEBHOOK_MSG",
+      "QUEUE_RETRY"
     ],
     "resources": {
       "media": [
