@@ -32,9 +32,10 @@ function enqueueFailed(text, dest, ts) {
 }
 function queueAfterResult(q, ok) {
     if (!q.length) return q;
-    if (ok) { q.shift(); return q; }
-    q[0].tries = (q[0].tries || 0) + 1;
-    if (q[0].tries >= MAX_QUEUE_RETRIES) q.shift();
+    var item = q.shift();
+    if (ok) return q;
+    item.tries = (item.tries || 0) + 1;
+    if (item.tries < MAX_QUEUE_RETRIES) q.push(item);
     return q;
 }
 
@@ -103,53 +104,93 @@ check('empty queue is left alone',
 
 var q = [{ text: 'a', tries: 0 }, { text: 'b', tries: 0 }];
 q = queueAfterResult(q, false);
-check('failure increments the head tries', q[0].tries, 1);
-check('failure keeps the head in place (order preserved)',
-    q.map(function(e) { return e.text; }).join(','), 'a,b');
+check('failure moves the head to the tail (b is now next up)',
+    q.map(function(e) { return e.text; }).join(','), 'b,a');
+check('failure increments tries on the re-appended item',
+    q[q.length - 1].tries, 1);
+check('a re-appended item keeps its text', q[q.length - 1].text, 'a');
 
 section('queueAfterResult — retry cap');
 
-var poison = [{ text: 'bad', tries: 0 }, { text: 'good', tries: 0 }];
-for (var k = 0; k < MAX_QUEUE_RETRIES; k++) poison = queueAfterResult(poison, false);
-check('a permanently failing head is dropped after the cap',
-    poison.map(function(e) { return e.text; }).join(','), 'good');
+// A permanently failing item cycles to the tail each time; it is dropped only
+// once it has used up MAX_QUEUE_RETRIES attempts.
+var poison = [{ text: 'bad', tries: 0 }];
+for (var k = 0; k < MAX_QUEUE_RETRIES - 1; k++) poison = queueAfterResult(poison, false);
+check('survives up to the cap (still queued, cycling)', poison.length, 1);
+check('retry count reaches cap - 1 before the last attempt',
+    poison[0].tries, MAX_QUEUE_RETRIES - 1);
+poison = queueAfterResult(poison, false);
+check('dropped once it exhausts MAX_QUEUE_RETRIES attempts', poison.length, 0);
 
 // ============================================================
 // End-to-end drain simulation (mirrors flushQueue control flow)
 // ============================================================
 
-section('drain simulation — outage then recovery, FIFO preserved');
+section('drain simulation — per-destination failure isolation');
 
-reset();
-enqueueFailed('note-1', 'notion',  10);
-enqueueFailed('note-2', 'todoist', 11);
-enqueueFailed('note-3', 'webhook', 12);
-
-var delivered = [];
-
-// One flush pass over the head, honouring the "stop on first failure" rule.
-// Returns true when the head was delivered (so the caller keeps draining).
-function flushOnce(online) {
-    var cur = getQueue();
-    if (!cur.length) return false;
-    var head = cur[0];
-    var ok = online;
-    if (ok) delivered.push(head.text);
-    saveQueue(queueAfterResult(getQueue(), ok));
-    return ok;
+// Faithful synchronous mirror of flushStep() in index.js. `downDests` is the
+// set of destinations that are unreachable for this simulated pass. Returns the
+// list of note texts delivered during the pass, in the order they went out.
+function drainPass(downDests) {
+    var delivered = [];
+    var down = {};        // destinations found down during this pass
+    var rotated = 0;      // consecutive head-skips without a real attempt
+    while (true) {
+        var cur = getQueue();
+        if (cur.length === 0) break;
+        if (down[cur[0].dest]) {
+            // Head bound for an already-down destination: rotate past it. When a
+            // full lap yields no attemptable item, every remaining dest is down.
+            if (rotated >= cur.length) break;
+            cur.push(cur.shift());
+            saveQueue(cur);
+            rotated++;
+            continue;
+        }
+        var item = cur[0];
+        var ok = !downDests[item.dest];
+        saveQueue(queueAfterResult(getQueue(), ok));
+        if (ok) delivered.push(item.text);
+        else    down[item.dest] = 1;
+        rotated = 0;
+    }
+    return delivered;
 }
 
-// Network down: one trigger fires; head fails, draining stops.
-flushOnce(false);
-check('nothing delivered while offline', delivered.join(','), '');
-check('head retry recorded, queue intact', getQueue()[0].tries, 1);
-check('order unchanged during outage',
-    getQueue().map(function(e) { return e.text; }).join(','), 'note-1,note-2,note-3');
+// One destination down must not block notes bound for a healthy one.
+reset();
+enqueueFailed('w-1', 'webhook', 10);
+enqueueFailed('n-1', 'notion',  11);
+enqueueFailed('w-2', 'webhook', 12);
+enqueueFailed('n-2', 'notion',  13);
 
-// Network back: drain until the queue empties or the head fails.
-while (flushOnce(true)) { /* keep draining */ }
-check('all notes delivered in original order once online',
-    delivered.join(','), 'note-1,note-2,note-3');
+var out = drainPass({ webhook: 1 }).sort().join(',');
+check('notes for a healthy destination deliver despite another being down',
+    out, 'n-1,n-2');
+check('notes for the down destination stay queued',
+    getQueue().map(function(e) { return e.text; }).sort().join(','), 'w-1,w-2');
+check('a down destination is charged only one retry per pass (skip, not spin)',
+    getQueue().reduce(function(s, e) { return s + (e.tries || 0); }, 0), 1);
+
+section('drain simulation — outage then full recovery');
+
+reset();
+enqueueFailed('note-1', 'notion', 20);
+enqueueFailed('note-2', 'notion', 21);
+enqueueFailed('note-3', 'notion', 22);
+
+// Offline: notion is down, so the first item is tried once and the rest are
+// skipped for the pass — nothing delivered, retries not burned across the board.
+var off = drainPass({ notion: 1 });
+check('nothing delivered while offline', off.join(','), '');
+check('only one retry charged during the outage pass',
+    getQueue().reduce(function(s, e) { return s + (e.tries || 0); }, 0), 1);
+check('all three notes still queued', getQueue().length, 3);
+
+// Back online: the whole backlog drains (rotation may reorder a retried head).
+var on = drainPass({});
+check('all notes delivered once back online', on.slice().sort().join(','),
+    'note-1,note-2,note-3');
 check('queue is empty after a full drain', getQueue().length, 0);
 
 // ============================================================

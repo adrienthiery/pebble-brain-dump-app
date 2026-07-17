@@ -79,15 +79,18 @@ function enqueueFailed(text, dest, ts) {
     saveQueue(q);
 }
 
-// Advance the queue after a delivery attempt on its head item. On success the
-// head is removed; on failure its retry counter grows and it is dropped once it
-// exceeds the cap (so a permanently failing note can't block the rest forever).
-// Pure — the caller reads/writes storage — so it stays easy to unit-test.
+// Advance the queue after a delivery attempt on its head item. The head is
+// shifted off in all cases; on failure its retry counter grows and it is
+// re-appended at the tail unless it has exhausted the cap (then it is dropped).
+// Re-appending means a permanently failing item cycles to the back instead of
+// head-blocking the rest of the queue. Pure — the caller reads/writes storage —
+// so it stays easy to unit-test.
 function queueAfterResult(q, ok) {
     if (!q.length) return q;
-    if (ok) { q.shift(); return q; }
-    q[0].tries = (q[0].tries || 0) + 1;
-    if (q[0].tries >= MAX_QUEUE_RETRIES) q.shift();
+    var item = q.shift();
+    if (ok) return q;
+    item.tries = (item.tries || 0) + 1;
+    if (item.tries < MAX_QUEUE_RETRIES) q.push(item);
     return q;
 }
 
@@ -1419,28 +1422,52 @@ function routeAndSend(text, isFollowup) {
 }
 
 // Try to deliver queued notes oldest-first. Runs on the PebbleKit JS 'ready'
-// event and after any successful send. Serialized via s_flushing; stops on the
-// first failure so a still-down network doesn't burn every item's retries in
-// one pass — the next trigger picks up where this left off.
+// event and after any successful send. Serialized via s_flushing.
+//
+// Failures are tracked per-destination, not globally: when a send to a
+// destination fails, that destination is marked down for the rest of this pass
+// and its items are skipped, but items bound for other destinations still get a
+// try. So a webhook being down no longer blocks queued Notion notes. The pass
+// ends only once every remaining item is bound for a destination that already
+// failed this pass; the next trigger starts a fresh pass.
 var s_flushing = false;
 function flushQueue() {
     if (s_flushing) return;
-    var q = getQueue();
-    if (q.length === 0) return;
+    if (getQueue().length === 0) return;
     s_flushing = true;
-    var cfg  = getConfig();
+    flushStep(getConfig(), {}, 0);
+}
+
+// One step of a flush pass. `down` is the set of destinations that have already
+// failed this pass. `rotated` counts how many heads we have skipped in a row
+// without a real send attempt — once it reaches the queue length, every
+// remaining item is bound for a down destination and the pass is over.
+function flushStep(cfg, down, rotated) {
+    var q = getQueue();
+    if (q.length === 0) { s_flushing = false; return; }
+
+    // Head is bound for a destination already known down this pass: rotate it to
+    // the tail (no retry charged) and move on to the next distinct destination.
+    if (down[q[0].dest]) {
+        if (rotated >= q.length) { s_flushing = false; return; }
+        q.push(q.shift());
+        saveQueue(q);
+        flushStep(cfg, down, rotated + 1);
+        return;
+    }
+
     var item = q[0];
     sendToDest(item.dest, item.text, cfg, function(ok, data) {
         saveQueue(queueAfterResult(getQueue(), ok));
-        s_flushing = false;
         if (ok) {
             var di = DEST_INDEX[item.dest] !== undefined ? DEST_INDEX[item.dest] : 4;
             addHistory(item.text, di);
             console.log('Retried queued note → ' + item.dest);
-            flushQueue();   // network is up — keep draining the backlog
         } else {
+            down[item.dest] = 1;   // this destination is down — skip it this pass
             console.log('Queued note still failing (' + item.dest + '): ' + data);
         }
+        flushStep(cfg, down, 0);   // real attempt made — reset the skip counter
     });
 }
 
