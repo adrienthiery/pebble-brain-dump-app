@@ -6,7 +6,7 @@
 // ============================================================
 
 var MAX_QUEUE_RETRIES = 5;
-var MAX_QUEUE_LEN     = 50;
+var MAX_QUEUE_LEN     = 10;
 
 // Minimal localStorage stand-in (the pkjs runtime provides the real one).
 var _store = {};

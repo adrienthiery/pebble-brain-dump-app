@@ -9,7 +9,7 @@ var KEY_QUEUE   = 'brain_dump_queue_v1';
 // Retry queue bounds: drop an item after this many failed attempts, and never
 // let the queue grow past this many entries (oldest dropped first).
 var MAX_QUEUE_RETRIES = 5;
-var MAX_QUEUE_LEN     = 50;
+var MAX_QUEUE_LEN     = 10;
 
 var TASKS_CLIENT_ID = '122599459809-1egpb0mrc97lpeh6fshnfv1i1drnvnkd.apps.googleusercontent.com';
 // secrets.js is gitignored; secrets.example.js is the committed placeholder.
