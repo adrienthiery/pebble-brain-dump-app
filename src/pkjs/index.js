@@ -904,6 +904,18 @@ function buildWebhookPayload(text) {
     };
 }
 
+// Discord webhooks require a "content" field and reject the generic
+// {text, timestamp} body with a 400. Discord's own <t:epoch:f> markup
+// renders in each viewer's local timezone, so we get a correct-looking
+// timestamp for free without doing any TZ math here.
+function buildDiscordPayload(payload) {
+    return { content: payload.text + '\n_(<t:' + payload.timestamp + ':f>)_' };
+}
+
+function webhookRequestBody(format, payload) {
+    return format === 'discord' ? buildDiscordPayload(payload) : payload;
+}
+
 // Substitute {text}/{timestamp}/{json} placeholders in a webhook URL. Returns
 // the URL unchanged when it has no placeholders.
 function applyWebhookTemplate(url, payload) {
@@ -925,13 +937,17 @@ function buildWebhookUrl(url, verb, payload) {
 }
 
 function sendToWebhook(text, cfg, cb) {
-    var url   = cfg.webhook_url;
-    var verb  = (cfg.webhook_verb  || 'POST').toUpperCase();
-    var token = cfg.webhook_token;
+    var url    = cfg.webhook_url;
+    var verb   = (cfg.webhook_verb  || 'POST').toUpperCase();
+    var token  = cfg.webhook_token;
+    var format = cfg.webhook_format || 'generic';
     if (!url) { cb(false, 'Webhook not configured'); return; }
 
     var payload  = buildWebhookPayload(text);
+    // Discord doesn't support GET/PUT/PATCH for webhook execute — force POST.
+    if (format === 'discord') verb = 'POST';
     var finalUrl = buildWebhookUrl(url, verb, payload);
+    var body     = webhookRequestBody(format, payload);
 
     var xhr = new XMLHttpRequest();
     if (verb === 'GET') {
@@ -954,7 +970,7 @@ function sendToWebhook(text, cfg, cb) {
     };
     xhr.onerror = function() { cb(false, 'Network error'); };
     if (verb !== 'GET') {
-        xhr.send(JSON.stringify(payload));
+        xhr.send(JSON.stringify(body));
     } else {
         xhr.send();
     }
@@ -1831,14 +1847,19 @@ function openSettings() {
     '<label class="toggle-label"><input type="checkbox" id="webhook_enabled" ' + chk(cfg.webhook_enabled) + '>' +
     ' Custom Webhook</label>' +
     '<div class="fields">' +
+    'Format:<select id="webhook_format" onchange="updateWebhookFormatUI()">' +
+    '<option value="generic" ' + sel(cfg.webhook_format || 'generic','generic') + '>Generic (JSON: text, timestamp)</option>' +
+    '<option value="discord" ' + sel(cfg.webhook_format,'discord') + '>Discord webhook</option>' +
+    '</select>' +
     'URL:<input type="text" id="webhook_url" value=\'' + esc(cfg.webhook_url) + '\'>' +
-    '<p class="note">Supports URL placeholders: <code>{text}</code>, <code>{timestamp}</code>, <code>{json}</code>. AutoRemote example: <code>message=brain_dump=:={json}</code></p>' +
-    'Method:<select id="webhook_verb">' +
+    '<p class="note" id="webhook_generic_note">Supports URL placeholders: <code>{text}</code>, <code>{timestamp}</code>, <code>{json}</code>. AutoRemote example: <code>message=brain_dump=:={json}</code></p>' +
+    '<p class="note" id="webhook_discord_note" style="display:none">Paste a Discord channel webhook URL (Server Settings &rarr; Integrations &rarr; Webhooks). The note is sent as the message content with a Discord-native timestamp that displays in each viewer\'s own timezone.</p>' +
+    '<div id="webhook_verb_row">Method:<select id="webhook_verb">' +
     '<option value="POST"  ' + sel(cfg.webhook_verb,'POST')  + '>POST</option>' +
     '<option value="PUT"   ' + sel(cfg.webhook_verb,'PUT')   + '>PUT</option>' +
     '<option value="PATCH" ' + sel(cfg.webhook_verb,'PATCH') + '>PATCH</option>' +
     '<option value="GET"   ' + sel(cfg.webhook_verb,'GET')   + '>GET</option>' +
-    '</select>' +
+    '</select></div>' +
     'Bearer token (optional):<input type="password" id="webhook_token" value=\'' + esc(cfg.webhook_token) + '\'>' +
     'Trigger keywords (comma-separated):<input type="text" id="webhook_keywords"' +
     ' value=\'' + esc(cfg.webhook_keywords) + '\' placeholder="send, post, hook">' +
@@ -1940,6 +1961,14 @@ function openSettings() {
         'el.style.pointerEvents=dim?"none":"";' +
       '});' +
     '}' +
+    // Discord webhooks always POST plain JSON {content}; the method picker
+    // and generic placeholder note don't apply, so hide them for that format.
+    'function updateWebhookFormatUI(){' +
+      'var isDiscord=document.getElementById("webhook_format").value==="discord";' +
+      'document.getElementById("webhook_verb_row").style.display=isDiscord?"none":"";' +
+      'document.getElementById("webhook_generic_note").style.display=isDiscord?"none":"";' +
+      'document.getElementById("webhook_discord_note").style.display=isDiscord?"":"none";' +
+    '}' +
     'window.addEventListener("load",function(){' +
       'var tok=document.getElementById("tasks_access_token").value;' +
       'if(tok)fetchTaskLists(tok);' +
@@ -1947,6 +1976,7 @@ function openSettings() {
       'var tdTok=document.getElementById("todoist_token").value;' +
       'if(tdTok)fetchTodoistProjects(tdTok);' +
       'updateRoutingUI();' +
+      'updateWebhookFormatUI();' +
     '});' +
     'function copyAuthUrl(){' +
       'var el=document.getElementById("tasks_auth_url");' +
@@ -2042,6 +2072,7 @@ function openSettings() {
     'ai_system:document.getElementById("ai_system").value.trim(),' +
     'ai_keywords:document.getElementById("ai_keywords").value.trim(),' +
     'webhook_enabled:document.getElementById("webhook_enabled").checked,' +
+    'webhook_format:document.getElementById("webhook_format").value,' +
     'webhook_url:document.getElementById("webhook_url").value.trim(),' +
     'webhook_verb:document.getElementById("webhook_verb").value,' +
     'webhook_token:document.getElementById("webhook_token").value.trim(),' +
