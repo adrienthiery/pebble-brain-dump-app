@@ -2047,7 +2047,11 @@ function computeDestMask(cfg) {
 Pebble.addEventListener('ready', function() {
     console.log('Brain Dump JS ready');
     var cfg     = getConfig();
-    sendToWatch({ DEST_MASK: computeDestMask(cfg) });
+    sendToWatch({
+        DEST_MASK: computeDestMask(cfg),
+        QUICK_SKIP_CONFIRM: cfg.quick_skip_confirm ? 1 : 0,
+        QUICK_AUTO_EXIT: cfg.quick_auto_exit ? 1 : 0
+    });
 
     // Retry any sends that failed while the phone was offline / the API was down.
     flushQueue();
@@ -2240,6 +2244,15 @@ function openSettings() {
     '<label><input type="checkbox" id="metric_units" ' + chk(cfg.metric_units !== false) + '>' +
     '<span>Metric units (km, °C)</span></label>' +
     '<p class="note">24h / 12h clock is read directly from your watch.</p>' +
+    '</div>' +
+
+    '<h3>Quick Launch</h3>' +
+    '<div class="section">' +
+    '<label><input type="checkbox" id="quick_skip_confirm" ' + chk(cfg.quick_skip_confirm) + '>' +
+    '<span>Send without review</span></label>' +
+    '<label><input type="checkbox" id="quick_auto_exit" ' + chk(cfg.quick_auto_exit) + '>' +
+    '<span>Exit app after saving</span></label>' +
+    '<p class="note">These only apply when the app is opened via a Quick Launch long-press. Follow-up prompts and errors still stay on screen.</p>' +
     '</div>' +
 
     '<h3>Routing</h3>' +
@@ -2623,6 +2636,8 @@ function openSettings() {
     'function buildCfg(){' +
     'return {' +
     'metric_units:document.getElementById("metric_units").checked,' +
+    'quick_skip_confirm:document.getElementById("quick_skip_confirm").checked,' +
+    'quick_auto_exit:document.getElementById("quick_auto_exit").checked,' +
     'routing_auto:!document.getElementById("disable_smart_routing").checked,' +
     'default_dest:document.getElementById("default_dest").value,' +
     'tasks_enabled:document.getElementById("tasks_enabled").checked,' +
@@ -2727,8 +2742,12 @@ Pebble.addEventListener('webviewclosed', function(e) {
         delete cfg._reopen;
         saveConfig(cfg);
         console.log('Config saved, dest mask recalculated');
-        // Re-send DEST_MASK so newly enabled destinations are available immediately.
-        sendToWatch({ DEST_MASK: computeDestMask(cfg) });
+        // Re-send the watch-mirrored settings (dest mask + Quick Launch flags)
+        sendToWatch({
+            DEST_MASK: computeDestMask(cfg),
+            QUICK_SKIP_CONFIRM: cfg.quick_skip_confirm ? 1 : 0,
+            QUICK_AUTO_EXIT: cfg.quick_auto_exit ? 1 : 0
+        });
         // "Save & verify target" (Notion refresh): reopen settings so the pkjs
         // probe re-runs against the just-saved target.
         if (reopen) openSettings();

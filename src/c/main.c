@@ -31,6 +31,11 @@
 #define HISTORY_FULL_CHUNKS          3   // 3 × 200 = 600 = HISTORY_FULL_LEN
 #define PERSIST_HIST_FULL_BASE     100   // chunk c of slot s at 100 + s*CHUNKS + c
 
+// Quick Launch behavior flags (set from the phone settings page, persisted
+// on-watch so they're available immediately at quick-launch time).
+#define PERSIST_QUICK_SKIP_CONFIRM   5
+#define PERSIST_QUICK_AUTO_EXIT      6
+
 // Reminders (local storage, always available)
 #define MAX_REMINDERS       16
 #define REMINDER_TEXT_LEN  200
@@ -200,6 +205,9 @@ static bool    s_response_open      = false;
 static bool    s_is_followup        = false;
 static bool    s_in_ai_thread        = false;
 static int     s_dest_mask           = DEST_BIT_AI;   // default until phone responds
+static bool    s_quick_launch        = false;         // launched via long-press Quick Launch
+static bool    s_cfg_quick_skip_confirm = false;      // route without the review screen
+static bool    s_cfg_quick_auto_exit    = false;      // exit once the note is saved
 static int16_t s_resp_scroll_offset  = 0;
 static int16_t s_detail_scroll_offset = 0;
 
@@ -710,6 +718,17 @@ static void appmsg_queue_retry(void) {
     app_message_outbox_send();
 }
 
+// Quick Launch + auto-exit: once the note is safely stored, buzz for eyes-free
+// feedback and pop every window, which ends the app. Returns true if it exited
+// (callers then skip the DUMPED success screen). Failure paths never call this,
+// so errors still surface on-screen.
+static bool quick_exit_after_save(void) {
+    if (!(s_quick_launch && s_cfg_quick_auto_exit)) return false;
+    vibes_short_pulse();
+    window_stack_pop_all(true);
+    return true;
+}
+
 static void route_note(bool is_followup) {
     if (!is_phone_connected()) {
         if (is_followup) {
@@ -718,13 +737,13 @@ static void route_note(bool is_followup) {
         }
         reminders_add(s_note_buf);
         set_status("Saved locally ✓");
-        success_window_push(DEST_LOCAL);
+        if (!quick_exit_after_save()) success_window_push(DEST_LOCAL);
         return;
     }
     if (s_dest_mask == 0 && !is_followup) {
         reminders_add(s_note_buf);
         set_status("Saved to reminders");
-        success_window_push(DEST_LOCAL);
+        if (!quick_exit_after_save()) success_window_push(DEST_LOCAL);
     } else {
         if (is_followup) {
             conv_append_question(s_note_buf);
@@ -747,6 +766,19 @@ static void inbox_received_callback(DictionaryIterator *iter, void *context) {
     if (mask_t) {
         s_dest_mask = (int)mask_t->value->int32;
         APP_LOG(APP_LOG_LEVEL_INFO, "dest_mask=%d", s_dest_mask);
+    }
+
+    // Quick Launch behavior flags — persisted so the next quick launch has them
+    // before the phone connection is even up.
+    Tuple *qsc_t = dict_find(iter, MESSAGE_KEY_QUICK_SKIP_CONFIRM);
+    if (qsc_t) {
+        s_cfg_quick_skip_confirm = qsc_t->value->int32 != 0;
+        persist_write_bool(PERSIST_QUICK_SKIP_CONFIRM, s_cfg_quick_skip_confirm);
+    }
+    Tuple *qae_t = dict_find(iter, MESSAGE_KEY_QUICK_AUTO_EXIT);
+    if (qae_t) {
+        s_cfg_quick_auto_exit = qae_t->value->int32 != 0;
+        persist_write_bool(PERSIST_QUICK_AUTO_EXIT, s_cfg_quick_auto_exit);
     }
 
     // ROUTING_DONE — JS has decided destination
@@ -807,7 +839,7 @@ static void inbox_received_callback(DictionaryIterator *iter, void *context) {
                 snprintf(msg, sizeof(msg), "Sent → %s ✓", dest_full_name(dest));
                 set_status(msg);
             }
-            success_window_push(dest);
+            if (!quick_exit_after_save()) success_window_push(dest);
         } else {
             Tuple *err_t = dict_find(iter, MESSAGE_KEY_ERROR_MSG);
             const char *emsg = (err_t && err_t->value->cstring[0])
@@ -875,6 +907,12 @@ static void dictation_callback(DictationSession *session,
         strncpy(s_note_buf, transcription, NOTE_BUF_SIZE - 1);
         s_note_buf[NOTE_BUF_SIZE - 1] = '\0';
         APP_LOG(APP_LOG_LEVEL_INFO, "Dictation: %s", s_note_buf);
+        // Quick Launch hands-off capture: route straight away, no review screen.
+        // Follow-ups (AI thread) keep the review step — they're already interactive.
+        if (s_quick_launch && s_cfg_quick_skip_confirm && !is_followup) {
+            route_note(false);
+            return;
+        }
         s_confirm_is_followup = is_followup;
         confirm_window_push();
     } else {
@@ -2473,11 +2511,18 @@ static void init(void) {
     debug_seed();
 #endif
 
+    // Quick Launch behavior flags — last values pushed from the phone settings.
+    s_quick_launch = (launch_reason() == APP_LAUNCH_QUICK_LAUNCH);
+    s_cfg_quick_skip_confirm = persist_exists(PERSIST_QUICK_SKIP_CONFIRM)
+                               && persist_read_bool(PERSIST_QUICK_SKIP_CONFIRM);
+    s_cfg_quick_auto_exit    = persist_exists(PERSIST_QUICK_AUTO_EXIT)
+                               && persist_read_bool(PERSIST_QUICK_AUTO_EXIT);
+
     // Push home window
     home_window_push();
 
     // If launched via quick launch (long-press from watch face), auto-start dictation
-    if (launch_reason() == APP_LAUNCH_QUICK_LAUNCH) {
+    if (s_quick_launch) {
         app_timer_register(400, hist_start_dictation_cb, NULL);
     }
 }
