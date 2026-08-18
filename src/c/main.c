@@ -46,6 +46,7 @@
 #define DEST_TODOIST    5
 #define DEST_NEXTCLOUD  6
 #define DEST_NEXTCLOUD_TASKS 7
+#define DEST_DISCORD   8
 
 // Destination bitmask bits (must match pkjs DEST_MASK)
 #define DEST_BIT_TASKS     (1 << DEST_TASKS)
@@ -55,6 +56,7 @@
 #define DEST_BIT_TODOIST   (1 << DEST_TODOIST)
 #define DEST_BIT_NEXTCLOUD (1 << DEST_NEXTCLOUD)
 #define DEST_BIT_NEXTCLOUD_TASKS (1 << DEST_NEXTCLOUD_TASKS)
+#define DEST_BIT_DISCORD   (1 << DEST_DISCORD)
 
 // Ink theme — strict black & white
 #define C_SCREEN   GColorBlack
@@ -315,6 +317,7 @@ static const char *dest_full_name(int dest) {
         case DEST_TODOIST:   return "Todoist";
         case DEST_NEXTCLOUD: return "Nextcloud Notes";
         case DEST_NEXTCLOUD_TASKS: return "Nextcloud Tasks";
+        case DEST_DISCORD:   return "Discord";
         default:             return "?";
     }
 }
@@ -1105,6 +1108,7 @@ static void draw_dest_glyph(GContext *ctx, int dest, GPoint c, GColor fg) {
         case DEST_WEBHOOK:   draw_glyph_letter(ctx, 'H', c, fg); break;
         case DEST_NEXTCLOUD: draw_glyph_letter(ctx, 'C', c, fg); break;
         case DEST_NEXTCLOUD_TASKS: draw_glyph_letter(ctx, 'C', c, fg); break;
+        case DEST_DISCORD:   draw_glyph_letter(ctx, 'D', c, fg); break;
         default:             draw_glyph_letter(ctx, '?', c, fg); break;
     }
 }

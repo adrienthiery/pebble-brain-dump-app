@@ -24,16 +24,19 @@ function getQueue() {
 function saveQueue(q) {
     try { localStorage.setItem(KEY_QUEUE, JSON.stringify(q)); } catch(e) {}
 }
-function enqueueFailed(text, dest, ts) {
+function enqueueFailed(text, dest, ts, retryState) {
     var q = getQueue();
-    q.push({ text: text, dest: dest, ts: ts, tries: 0 });
+    var item = { text: text, dest: dest, ts: ts, tries: 0 };
+    if (retryState) item.retryState = retryState;
+    q.push(item);
     if (q.length > MAX_QUEUE_LEN) q = q.slice(q.length - MAX_QUEUE_LEN);
     saveQueue(q);
 }
-function queueAfterResult(q, ok) {
+function queueAfterResult(q, ok, retryState) {
     if (!q.length) return q;
     var item = q.shift();
     if (ok) return q;
+    if (retryState) item.retryState = retryState;
     item.tries = (item.tries || 0) + 1;
     if (item.tries < MAX_QUEUE_RETRIES) q.push(item);
     return q;
@@ -81,6 +84,12 @@ check('stores the resolved destination', getQueue()[1].dest, 'todoist');
 check('new entries start at zero tries', getQueue()[2].tries, 0);
 
 reset();
+enqueueFailed('split note', 'discord', 1003,
+    { discordPart: 1, timestamp: 1003 });
+checkObject('stores destination-specific retry progress', getQueue()[0].retryState,
+    { discordPart: 1, timestamp: 1003 });
+
+reset();
 for (var i = 0; i < MAX_QUEUE_LEN + 10; i++) enqueueFailed('n' + i, 'notion', i);
 check('caps queue length at MAX_QUEUE_LEN', getQueue().length, MAX_QUEUE_LEN);
 check('drops oldest entries when full (newest kept)',
@@ -109,6 +118,12 @@ check('failure moves the head to the tail (b is now next up)',
 check('failure increments tries on the re-appended item',
     q[q.length - 1].tries, 1);
 check('a re-appended item keeps its text', q[q.length - 1].text, 'a');
+
+var split = [{ text: 'split', dest: 'discord', tries: 0,
+    retryState: { discordPart: 1, timestamp: 1000 } }];
+split = queueAfterResult(split, false, { discordPart: 2, timestamp: 1000 });
+checkObject('a failed retry advances destination-specific progress',
+    split[0].retryState, { discordPart: 2, timestamp: 1000 });
 
 section('queueAfterResult — retry cap');
 

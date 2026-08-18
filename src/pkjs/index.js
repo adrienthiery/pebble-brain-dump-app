@@ -1,5 +1,5 @@
 // Brain Dump — PebbleKit JS
-// Routes voice notes to Google Tasks / Notion / AI agent / Custom Webhook
+// Routes voice notes to Google Tasks / Notion / AI agent / Custom Webhook / Discord
 // Intent classification runs locally; no extra API call needed for routing.
 
 var KEY_CONFIG  = 'brain_dump_cfg_v1';
@@ -26,7 +26,8 @@ var s_ai_messages  = [];
 var s_last_note    = '';
 var s_clock_24h    = false;   // updated from watch on each note
 // The last failed cloud send, held until the watch reports the user's fallback
-// choice. Queued on "Retry later" (QUEUE_RETRY); dropped otherwise. { text, dest, ts }.
+// choice. Queued on "Retry later" (QUEUE_RETRY); dropped otherwise.
+// { text, dest, ts, retryState? }.
 var s_pending_retry = null;
 
 // ============================================================================
@@ -63,7 +64,7 @@ function addHistory(text, dest) {
 // When a note is transcribed but delivery to its destination fails (network
 // drop, API error, rate limit), it is queued here instead of dead-ending in
 // the on-watch fallback. The queue is FIFO and flushed on 'ready' and after
-// any successful send. Entries: { text, dest, ts, tries }.
+// any successful send. Entries: { text, dest, ts, tries, retryState? }.
 
 function getQueue() {
     try { var r = localStorage.getItem(KEY_QUEUE); return r ? JSON.parse(r) : []; }
@@ -75,9 +76,11 @@ function saveQueue(q) {
 
 // Append a failed send, preserving its original dictation timestamp. Oldest
 // entries are dropped once the queue is full so it can't grow without bound.
-function enqueueFailed(text, dest, ts) {
+function enqueueFailed(text, dest, ts, retryState) {
     var q = getQueue();
-    q.push({ text: text, dest: dest, ts: ts, tries: 0 });
+    var item = { text: text, dest: dest, ts: ts, tries: 0 };
+    if (retryState) item.retryState = retryState;
+    q.push(item);
     if (q.length > MAX_QUEUE_LEN) q = q.slice(q.length - MAX_QUEUE_LEN);
     saveQueue(q);
 }
@@ -88,10 +91,11 @@ function enqueueFailed(text, dest, ts) {
 // Re-appending means a permanently failing item cycles to the back instead of
 // head-blocking the rest of the queue. Pure — the caller reads/writes storage —
 // so it stays easy to unit-test.
-function queueAfterResult(q, ok) {
+function queueAfterResult(q, ok, retryState) {
     if (!q.length) return q;
     var item = q.shift();
     if (ok) return q;
+    if (retryState) item.retryState = retryState;
     item.tries = (item.tries || 0) + 1;
     if (item.tries < MAX_QUEUE_RETRIES) q.push(item);
     return q;
@@ -107,7 +111,8 @@ function getEnabledDests(cfg) {
     if (cfg.todoist_enabled) d.push('todoist');
     if (cfg.notion_enabled)  d.push('notion');
     if (cfg.ai_enabled)      d.push('ai');
-    if (cfg.webhook_enabled)   d.push('webhook');
+    if (cfg.webhook_enabled) d.push('webhook');
+    if (cfg.discord_enabled) d.push('discord');
     if (cfg.nextcloud_enabled) d.push('nextcloud');
     if (cfg.nextcloud_tasks_enabled) d.push('nextcloud_tasks');
     return d;
@@ -278,6 +283,16 @@ function classifyIntent(text, enabled, cfg) {
         kw.forEach(function(k) {
             k = k.trim();
             if (k && t.indexOf(k) >= 0) scores['webhook'] += 3;
+        });
+    }
+
+    // Discord: service name plus configured trigger keywords
+    if (scores['discord'] !== undefined) {
+        ['discord', 'send to discord', 'post to discord'].forEach(function(k) {
+            if (t.indexOf(k) >= 0) scores['discord'] += 4;
+        });
+        getCustomKeywords(cfg, 'discord').forEach(function(k) {
+            if (t.indexOf(k) >= 0) scores['discord'] += 3;
         });
     }
 
@@ -961,6 +976,123 @@ function sendToWebhook(text, cfg, cb) {
 }
 
 // ============================================================================
+// DISCORD
+// ============================================================================
+
+var DISCORD_MAX_DESCRIPTION_LENGTH = 4096;
+var DISCORD_AVATAR_URL =
+    'https://raw.githubusercontent.com/adrienthiery/pebble-brain-dump-app/main/icon_144x144.png';
+
+// Keep every character of a long note by spreading it over as many Discord
+// embeds as needed. Avoid splitting an emoji's UTF-16 surrogate pair.
+function splitDiscordNote(text) {
+    var note = text === undefined || text === null ? '' : String(text);
+    if (!note.trim()) return ['*Empty note*'];
+    if (note.length <= DISCORD_MAX_DESCRIPTION_LENGTH) return [note];
+
+    var chunks = [];
+    var start = 0;
+    while (start < note.length) {
+        var end = Math.min(start + DISCORD_MAX_DESCRIPTION_LENGTH, note.length);
+        if (end < note.length &&
+            note.charCodeAt(end - 1) >= 0xd800 && note.charCodeAt(end - 1) <= 0xdbff &&
+            note.charCodeAt(end) >= 0xdc00 && note.charCodeAt(end) <= 0xdfff) {
+            end--;
+        }
+        chunks.push(note.slice(start, end));
+        start = end;
+    }
+    return chunks;
+}
+
+// Discord accepts ISO timestamps on embeds and renders them in each viewer's
+// locale. Match Brain Dump's orange identity and suppress unexpected mentions.
+function buildDiscordPayloads(payload) {
+    var chunks = splitDiscordNote(payload.text);
+    var timestamp = new Date(payload.timestamp * 1000).toISOString();
+    return chunks.map(function(description, index) {
+        var embed = {
+            description: description,
+            color: 0xff9900,
+            timestamp: timestamp
+        };
+        if (chunks.length > 1) {
+            embed.footer = { text: 'Part ' + (index + 1) + ' of ' + chunks.length };
+        }
+        return {
+            username: 'Brain Dump',
+            avatar_url: DISCORD_AVATAR_URL,
+            embeds: [embed],
+            allowed_mentions: { parse: [] }
+        };
+    });
+}
+
+// Ask Discord to confirm that each message was saved before advancing to the
+// next part. Preserve thread_id and any other query parameters in pasted URLs.
+function buildDiscordWebhookUrl(url) {
+    if (/[?&]wait=/i.test(url)) {
+        return url.replace(/([?&])wait=[^&]*/i, '$1wait=true');
+    }
+    return url + (url.indexOf('?') >= 0 ? '&' : '?') + 'wait=true';
+}
+
+// Discord returns retry_after in seconds. Prefer the response body, fall back to
+// the equivalent header, and use a small delay if neither can be parsed.
+function getDiscordRetryDelayMs(xhr) {
+    var retryAfter = null;
+    try {
+        var response = JSON.parse(xhr.responseText || '{}');
+        if (response.retry_after !== undefined) retryAfter = Number(response.retry_after);
+    } catch(e) {}
+    if (!(retryAfter >= 0) && xhr.getResponseHeader) {
+        retryAfter = Number(xhr.getResponseHeader('Retry-After'));
+    }
+    if (!(retryAfter >= 0)) retryAfter = 1;
+    return Math.ceil(retryAfter * 1000);
+}
+
+function sendToDiscord(text, cfg, cb, retryState) {
+    var url = cfg.discord_url;
+    if (!url) { cb(false, 'Discord not configured'); return; }
+
+    var payload = buildWebhookPayload(text);
+    if (retryState && retryState.timestamp) payload.timestamp = retryState.timestamp;
+    var bodies = buildDiscordPayloads(payload);
+    var firstPart = retryState && retryState.discordPart >= 0
+        ? Math.min(retryState.discordPart, bodies.length - 1)
+        : 0;
+
+    function failPart(index, message) {
+        cb(false, message, { discordPart: index, timestamp: payload.timestamp });
+    }
+
+    // Send parts sequentially so long notes remain ordered in Discord. Each part
+    // gets one rate-limit retry; a later queued retry resumes at the first unsent
+    // part so Discord never receives an already-confirmed part twice.
+    function sendPart(index, rateLimitRetries) {
+        var xhr = new XMLHttpRequest();
+        xhr.open('POST', buildDiscordWebhookUrl(url));
+        xhr.setRequestHeader('Content-Type', 'application/json');
+        xhr.onload = function() {
+            var isOk = this.status >= 200 && this.status < 300;
+            if (this.status === 429 && rateLimitRetries < 1) {
+                var delay = getDiscordRetryDelayMs(this);
+                setTimeout(function() { sendPart(index, rateLimitRetries + 1); }, delay);
+                return;
+            }
+            if (!isOk) { failPart(index, 'HTTP ' + this.status); return; }
+            if (index + 1 < bodies.length) { sendPart(index + 1, 0); return; }
+            cb(true, 'discord');
+        };
+        xhr.onerror = function() { failPart(index, 'Network error'); };
+        xhr.send(JSON.stringify(bodies[index]));
+    }
+
+    sendPart(firstPart, 0);
+}
+
+// ============================================================================
 // TODOIST
 // ============================================================================
 
@@ -1319,20 +1451,21 @@ function stripDateTimeFromText(text) {
 // ROUTER
 // ============================================================================
 
-var DEST_INDEX = { tasks: 0, notion: 1, ai: 2, webhook: 3, local: 4, todoist: 5, nextcloud: 6, nextcloud_tasks: 7 };
+var DEST_INDEX = { tasks: 0, notion: 1, ai: 2, webhook: 3, local: 4, todoist: 5, nextcloud: 6, nextcloud_tasks: 7, discord: 8 };
 
-// Destinations whose delivery is a one-shot HTTP send that can be safely
-// retried later. 'ai' (a live conversation) and 'local' (saved on-watch) are
-// intentionally excluded from the retry queue.
-var QUEUEABLE_DESTS = { tasks: 1, notion: 1, webhook: 1, todoist: 1, nextcloud: 1, nextcloud_tasks: 1 };
+// Destinations whose delivery can be safely retried or resumed later. 'ai' (a
+// live conversation) and 'local' (saved on-watch) are intentionally excluded
+// from the retry queue.
+var QUEUEABLE_DESTS = { tasks: 1, notion: 1, webhook: 1, todoist: 1, nextcloud: 1, nextcloud_tasks: 1, discord: 1 };
 
 // Dispatch a note to a single cloud destination. Shared by the live router and
 // the retry-queue flush so both take exactly the same delivery path.
-function sendToDest(dest, text, cfg, cb) {
+function sendToDest(dest, text, cfg, cb, retryState) {
     switch (dest) {
         case 'tasks':           sendToTasks         (text, cfg, cb); break;
         case 'notion':          sendToNotion        (text, cfg, cb); break;
         case 'webhook':         sendToWebhook       (text, cfg, cb); break;
+        case 'discord':         sendToDiscord       (text, cfg, cb, retryState); break;
         case 'todoist':         sendToTodoist       (text, cfg, cb); break;
         case 'nextcloud':       sendToNextcloud     (text, cfg, cb); break;
         case 'nextcloud_tasks': sendToNextcloudTasks(text, cfg, cb); break;
@@ -1388,9 +1521,9 @@ function routeAndSend(text, isFollowup) {
     // Original text is still used for routing, due-date extraction, and AI context.
     var sendText = cleanNoteText(text);
 
-    var DEST_LABEL = { tasks: 'Tasks', notion: 'Notion', ai: 'AI', webhook: 'Webhook', local: 'Local', todoist: 'Todoist', nextcloud: 'Nextcloud Notes', nextcloud_tasks: 'Nextcloud Tasks' };
+    var DEST_LABEL = { tasks: 'Tasks', notion: 'Notion', ai: 'AI', webhook: 'Webhook', local: 'Local', todoist: 'Todoist', nextcloud: 'Nextcloud Notes', nextcloud_tasks: 'Nextcloud Tasks', discord: 'Discord' };
 
-    function onResult(ok, data) {
+    function onResult(ok, data, retryState) {
         if (!ok) {
             console.log('Send failed: ' + data);
             // Don't auto-queue. Remember this failed send so the watch's fallback
@@ -1399,7 +1532,7 @@ function routeAndSend(text, isFollowup) {
             // mutually exclusive avoids the duplicate note the old auto-queue +
             // local-fallback overlap could produce (#4).
             s_pending_retry = QUEUEABLE_DESTS[dest]
-                ? { text: sendText, dest: dest, ts: ts }
+                ? { text: sendText, dest: dest, ts: ts, retryState: retryState }
                 : null;
             var label = DEST_LABEL[dest] || dest;
             var msg = (label + ': ' + (data || 'Unknown error')).substring(0, 45);
@@ -1427,7 +1560,7 @@ function routeAndSend(text, isFollowup) {
     switch (dest) {
         case 'ai':    sendToAI(sendText, isFollowup, cfg, onResult); break;
         case 'local': onResult(true, 'local'); break;  // saved on-watch from s_note_buf
-        default:      sendToDest(dest, sendText, cfg, onResult);
+        default:      sendToDest(dest, sendText, cfg, onResult, { timestamp: ts });
     }
 }
 
@@ -1467,8 +1600,8 @@ function flushStep(cfg, down, rotated) {
     }
 
     var item = q[0];
-    sendToDest(item.dest, item.text, cfg, function(ok, data) {
-        saveQueue(queueAfterResult(getQueue(), ok));
+    sendToDest(item.dest, item.text, cfg, function(ok, data, retryState) {
+        saveQueue(queueAfterResult(getQueue(), ok, retryState));
         if (ok) {
             var di = DEST_INDEX[item.dest] !== undefined ? DEST_INDEX[item.dest] : 4;
             addHistory(item.text, di);
@@ -1478,7 +1611,7 @@ function flushStep(cfg, down, rotated) {
             console.log('Queued note still failing (' + item.dest + '): ' + data);
         }
         flushStep(cfg, down, 0);   // real attempt made — reset the skip counter
-    });
+    }, item.retryState);
 }
 
 // AppMessage allows only one message in flight; a second sendAppMessage before
@@ -1516,6 +1649,7 @@ function computeDestMask(cfg) {
     if (enabled.indexOf('todoist')   >= 0) mask |= 32;
     if (enabled.indexOf('nextcloud') >= 0) mask |= 64;
     if (enabled.indexOf('nextcloud_tasks') >= 0) mask |= 128;
+    if (enabled.indexOf('discord')   >= 0) mask |= 256;
     return mask;
 }
 
@@ -1607,7 +1741,8 @@ Pebble.addEventListener('appmessage', function(e) {
     // note that just failed so it retries on the next 'ready' or successful send.
     if (p.QUEUE_RETRY) {
         if (s_pending_retry) {
-            enqueueFailed(s_pending_retry.text, s_pending_retry.dest, s_pending_retry.ts);
+            enqueueFailed(s_pending_retry.text, s_pending_retry.dest, s_pending_retry.ts,
+                s_pending_retry.retryState);
             console.log('Queued for retry → ' + s_pending_retry.dest);
             s_pending_retry = null;
         }
@@ -1696,6 +1831,7 @@ function openSettings() {
     '<option value="nextcloud" ' + sel(cfg.default_dest,'nextcloud') + '>Nextcloud Notes</option>' +
     '<option value="nextcloud_tasks" ' + sel(cfg.default_dest,'nextcloud_tasks') + '>Nextcloud Tasks</option>' +
     '<option value="webhook"   ' + sel(cfg.default_dest,'webhook')   + '>Webhook</option>' +
+    '<option value="discord"   ' + sel(cfg.default_dest,'discord')   + '>Discord</option>' +
     '</select></label>' +
     '</div>' +
 
@@ -1844,6 +1980,17 @@ function openSettings() {
     ' value=\'' + esc(cfg.webhook_keywords) + '\' placeholder="send, post, hook">' +
     '</div></div>' +
 
+    // ---- Discord ----
+    '<div class="section" id="sec_discord">' +
+    '<label class="toggle-label"><input type="checkbox" id="discord_enabled" ' + chk(cfg.discord_enabled) + '>' +
+    ' Discord</label>' +
+    '<div class="fields">' +
+    'Webhook URL:<input type="text" id="discord_url" value=\'' + esc(cfg.discord_url) + '\'>' +
+    '<p class="note">Create a channel webhook under Server Settings &rarr; Integrations &rarr; Webhooks. Notes are sent as embeds with timestamps.</p>' +
+    'Routing keywords (comma-separated, added to defaults):<input type="text" id="discord_keywords"' +
+    ' value=\'' + esc(cfg.discord_keywords) + '\' placeholder="discord, post to discord, ...">' +
+    '</div></div>' +
+
     '<div class="save-bar"><button onclick="save()">Save</button></div>' +
 
     '<script>' +
@@ -1933,7 +2080,7 @@ function openSettings() {
     'function updateRoutingUI(){' +
       'var off=document.getElementById("disable_smart_routing").checked;' +
       'var def=document.getElementById("default_dest").value;' +
-      '["tasks","todoist","notion","nextcloud","nextcloud_tasks","ai","webhook"].forEach(function(d){' +
+      '["tasks","todoist","notion","nextcloud","nextcloud_tasks","ai","webhook","discord"].forEach(function(d){' +
         'var el=document.getElementById("sec_"+d);if(!el)return;' +
         'var dim=off&&d!==def;' +
         'el.style.opacity=dim?"0.5":"";' +
@@ -2045,7 +2192,10 @@ function openSettings() {
     'webhook_url:document.getElementById("webhook_url").value.trim(),' +
     'webhook_verb:document.getElementById("webhook_verb").value,' +
     'webhook_token:document.getElementById("webhook_token").value.trim(),' +
-    'webhook_keywords:document.getElementById("webhook_keywords").value.trim()' +
+    'webhook_keywords:document.getElementById("webhook_keywords").value.trim(),' +
+    'discord_enabled:document.getElementById("discord_enabled").checked,' +
+    'discord_url:document.getElementById("discord_url").value.trim(),' +
+    'discord_keywords:document.getElementById("discord_keywords").value.trim()' +
     '};' +
     '}' +
     'function save(){' +
@@ -2083,7 +2233,7 @@ Pebble.addEventListener('webviewclosed', function(e) {
         delete cfg._reopen;
         saveConfig(cfg);
         console.log('Config saved, dest mask recalculated');
-        // Re-send DEST_MASK to watch (now includes todoist + nextcloud)
+        // Re-send DEST_MASK so newly enabled destinations are available immediately.
         sendToWatch({ DEST_MASK: computeDestMask(cfg) });
         // "Save & verify target" (Notion refresh): reopen settings so the pkjs
         // probe re-runs against the just-saved target.
