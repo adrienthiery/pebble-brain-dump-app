@@ -929,6 +929,44 @@ function applyWebhookTemplate(url, payload) {
         .replace(/\{json\}/g, json);
 }
 
+// Escape a string for use inside a JSON string literal, without the quotes —
+// so a body template can read '{"content": "{text}"}' and stay valid JSON when
+// the note contains quotes, backslashes or newlines.
+function jsonStringEscape(s) {
+    var quoted = JSON.stringify(String(s));
+    return quoted.substring(1, quoted.length - 1);
+}
+
+// A body can be any format the Content-Type says it is, so the note gets one
+// placeholder per escaping: {text} for a JSON string context and {text_url} for
+// a form-urlencoded one. {json} inserts the whole default payload verbatim.
+// Substituted in a single pass so a note that literally contains "{timestamp}"
+// isn't itself re-substituted after {text} is inserted.
+function applyWebhookBodyTemplate(tpl, payload) {
+    return tpl.replace(/\{(text_url|text|timestamp|json)\}/g, function(_, key) {
+        if (key === 'text')      return jsonStringEscape(payload.text);
+        if (key === 'text_url')  return encodeURIComponent(payload.text);
+        if (key === 'timestamp') return String(payload.timestamp);
+        return JSON.stringify(payload);
+    });
+}
+
+// The configured template wins; an empty one keeps the historical
+// {text,timestamp} payload, so existing endpoints see no change.
+function buildWebhookBody(body, payload) {
+    var tpl = (body || '').trim();
+    if (!tpl) return JSON.stringify(payload);
+    return applyWebhookBodyTemplate(tpl, payload);
+}
+
+// A body template is free-form, so the header describing it has to be too.
+// Unset means the default payload's own type.
+var WEBHOOK_DEFAULT_CONTENT_TYPE = 'application/json';
+
+function buildWebhookContentType(contentType) {
+    return (contentType || '').trim() || WEBHOOK_DEFAULT_CONTENT_TYPE;
+}
+
 // Templated URL wins; else for GET append text/timestamp query params as before.
 function buildWebhookUrl(url, verb, payload) {
     var templatedUrl = applyWebhookTemplate(url, payload);
@@ -953,7 +991,7 @@ function sendToWebhook(text, cfg, cb) {
         xhr.open('GET', finalUrl);
     } else {
         xhr.open(verb, finalUrl);
-        xhr.setRequestHeader('Content-Type', 'application/json');
+        xhr.setRequestHeader('Content-Type', buildWebhookContentType(cfg.webhook_content_type));
     }
     if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
     xhr.onload = function() {
@@ -969,8 +1007,9 @@ function sendToWebhook(text, cfg, cb) {
     };
     xhr.onerror = function() { cb(false, 'Network error'); };
     if (verb !== 'GET') {
-        xhr.send(JSON.stringify(payload));
+        xhr.send(buildWebhookBody(cfg.webhook_body, payload));
     } else {
+        // A GET request carries no body; the note travels in the URL instead.
         xhr.send();
     }
 }
@@ -1781,6 +1820,11 @@ function openSettings() {
         '&code_challenge_method=plain&access_type=offline&prompt=consent';
 
     function esc(s) { return (s || '').replace(/'/g, "\\'"); }
+    // Textarea content sits between tags, so it needs HTML escaping rather than
+    // the quote escaping attributes get.
+    function escText(s) {
+        return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
     function chk(v) { return v ? 'checked' : ''; }
     function sel(a, b) { return a === b ? 'selected' : ''; }
 
@@ -1792,9 +1836,10 @@ function openSettings() {
     'h2{color:#f90;margin:0 0 16px}' +
     'h3{color:#aaa;font-size:14px;margin:14px 0 6px;text-transform:uppercase}' +
     'label{display:flex;align-items:center;gap:8px;margin:6px 0;font-size:14px}' +
-    'input[type=text],input[type=password],select{width:100%;box-sizing:border-box;' +
+    'input[type=text],input[type=password],select,textarea{width:100%;box-sizing:border-box;' +
     'padding:8px;background:#222;color:#eee;border:1px solid #444;border-radius:4px;' +
     'font-size:13px;margin:4px 0}' +
+    'textarea{font-family:monospace;min-height:64px;resize:vertical}' +
     '.section{background:#1a1a1a;border:1px solid #333;border-radius:6px;' +
     'padding:12px;margin:12px 0}' +
     '.toggle-label{font-weight:bold;font-size:15px}' +
@@ -1969,12 +2014,20 @@ function openSettings() {
     '<div class="fields">' +
     'URL:<input type="text" id="webhook_url" value=\'' + esc(cfg.webhook_url) + '\'>' +
     '<p class="note">Supports URL placeholders: <code>{text}</code>, <code>{timestamp}</code>, <code>{json}</code>. AutoRemote example: <code>message=brain_dump=:={json}</code></p>' +
-    'Method:<select id="webhook_verb">' +
+    'Method:<select id="webhook_verb" onchange="updateWebhookVerbUI()">' +
     '<option value="POST"  ' + sel(cfg.webhook_verb,'POST')  + '>POST</option>' +
     '<option value="PUT"   ' + sel(cfg.webhook_verb,'PUT')   + '>PUT</option>' +
     '<option value="PATCH" ' + sel(cfg.webhook_verb,'PATCH') + '>PATCH</option>' +
     '<option value="GET"   ' + sel(cfg.webhook_verb,'GET')   + '>GET</option>' +
     '</select>' +
+    // Hidden as a block for GET, which carries neither a body nor its header.
+    '<div id="webhook_body_fields">' +
+    'Content-Type:<input type="text" id="webhook_content_type"' +
+    ' value=\'' + esc(cfg.webhook_content_type) + '\' placeholder="application/json">' +
+    'Body (optional):<textarea id="webhook_body" rows="3"' +
+    ' placeholder=\'{"content": "{text}"}\'>' + escText(cfg.webhook_body) + '</textarea>' +
+    '<p class="note">Placeholders: <code>{text}</code> (escaped for a JSON string), <code>{text_url}</code> (escaped for a form-urlencoded body), <code>{timestamp}</code>, <code>{json}</code> (the whole default payload). Left empty, the default <code>{"text":...,"timestamp":...}</code> is sent.</p>' +
+    '</div>' +
     'Bearer token (optional):<input type="password" id="webhook_token" value=\'' + esc(cfg.webhook_token) + '\'>' +
     'Trigger keywords (comma-separated):<input type="text" id="webhook_keywords"' +
     ' value=\'' + esc(cfg.webhook_keywords) + '\' placeholder="send, post, hook">' +
@@ -2087,6 +2140,12 @@ function openSettings() {
         'el.style.pointerEvents=dim?"none":"";' +
       '});' +
     '}' +
+    // GET sends no body, so hide the body fields rather than leave them looking
+    // effective. They keep their values, so switching back to POST restores them.
+    'function updateWebhookVerbUI(){' +
+      'var isGet=document.getElementById("webhook_verb").value==="GET";' +
+      'document.getElementById("webhook_body_fields").style.display=isGet?"none":"";' +
+    '}' +
     'window.addEventListener("load",function(){' +
       'var tok=document.getElementById("tasks_access_token").value;' +
       'if(tok)fetchTaskLists(tok);' +
@@ -2094,6 +2153,7 @@ function openSettings() {
       'var tdTok=document.getElementById("todoist_token").value;' +
       'if(tdTok)fetchTodoistProjects(tdTok);' +
       'updateRoutingUI();' +
+      'updateWebhookVerbUI();' +
     '});' +
     'function copyAuthUrl(){' +
       'var el=document.getElementById("tasks_auth_url");' +
@@ -2191,6 +2251,8 @@ function openSettings() {
     'webhook_enabled:document.getElementById("webhook_enabled").checked,' +
     'webhook_url:document.getElementById("webhook_url").value.trim(),' +
     'webhook_verb:document.getElementById("webhook_verb").value,' +
+    'webhook_content_type:document.getElementById("webhook_content_type").value.trim(),' +
+    'webhook_body:document.getElementById("webhook_body").value.trim(),' +
     'webhook_token:document.getElementById("webhook_token").value.trim(),' +
     'webhook_keywords:document.getElementById("webhook_keywords").value.trim(),' +
     'discord_enabled:document.getElementById("discord_enabled").checked,' +
