@@ -16,6 +16,32 @@ function applyWebhookTemplate(url, payload) {
         .replace(/\{json\}/g, json);
 }
 
+function jsonStringEscape(s) {
+    var quoted = JSON.stringify(String(s));
+    return quoted.substring(1, quoted.length - 1);
+}
+
+function applyWebhookBodyTemplate(tpl, payload) {
+    return tpl.replace(/\{(text_url|text|timestamp|json)\}/g, function(_, key) {
+        if (key === 'text')      return jsonStringEscape(payload.text);
+        if (key === 'text_url')  return encodeURIComponent(payload.text);
+        if (key === 'timestamp') return String(payload.timestamp);
+        return JSON.stringify(payload);
+    });
+}
+
+function buildWebhookBody(body, payload) {
+    var tpl = (body || '').trim();
+    if (!tpl) return JSON.stringify(payload);
+    return applyWebhookBodyTemplate(tpl, payload);
+}
+
+var WEBHOOK_DEFAULT_CONTENT_TYPE = 'application/json';
+
+function buildWebhookContentType(contentType) {
+    return (contentType || '').trim() || WEBHOOK_DEFAULT_CONTENT_TYPE;
+}
+
 function buildWebhookUrl(url, verb, payload) {
     var templatedUrl = applyWebhookTemplate(url, payload);
     if (templatedUrl !== url) return templatedUrl;
@@ -94,6 +120,87 @@ checkObject(
     'AutoRemote payload decodes to valid JSON',
     JSON.parse(decodeURIComponent(autoRemoteUrl.split('=:=')[1])),
     payload
+);
+
+section('Body template');
+check(
+    'empty body keeps the default payload',
+    buildWebhookBody('', payload),
+    JSON.stringify(payload)
+);
+check(
+    'whitespace-only body counts as empty',
+    buildWebhookBody('   \n  ', payload),
+    JSON.stringify(payload)
+);
+check(
+    'undefined body keeps the default payload',
+    buildWebhookBody(undefined, payload),
+    JSON.stringify(payload)
+);
+checkObject(
+    '{text} stays valid JSON when the note has quotes',
+    JSON.parse(buildWebhookBody('{"content": "{text}"}', payload)),
+    { content: 'Quote " and spaces' }
+);
+check(
+    '{timestamp} inserts an unquoted number',
+    buildWebhookBody('{"ts": {timestamp}}', payload),
+    '{"ts": 1770000000}'
+);
+checkObject(
+    '{json} inserts the default payload verbatim',
+    JSON.parse(buildWebhookBody('{"event": {json}}', payload)),
+    { event: payload }
+);
+
+var trickyPayload = buildWebhookPayload('newline\nand \\ backslash', 1770000000);
+checkObject(
+    'newlines and backslashes survive as JSON',
+    JSON.parse(buildWebhookBody('{"content": "{text}"}', trickyPayload)),
+    { content: 'newline\nand \\ backslash' }
+);
+
+var placeholderPayload = buildWebhookPayload('literally {timestamp} here', 1770000000);
+checkObject(
+    'a note containing {timestamp} is not re-substituted',
+    JSON.parse(buildWebhookBody('{"content": "{text}"}', placeholderPayload)),
+    { content: 'literally {timestamp} here' }
+);
+
+check(
+    'a non-JSON template is passed through as written',
+    buildWebhookBody('note={text}', buildWebhookPayload('hello', 1770000000)),
+    'note=hello'
+);
+
+var formPayload = buildWebhookPayload('a & b = c', 1770000000);
+check(
+    '{text_url} escapes a form-urlencoded body',
+    buildWebhookBody('note={text_url}&ts={timestamp}', formPayload),
+    'note=a%20%26%20b%20%3D%20c&ts=1770000000'
+);
+check(
+    '{text_url} and {text} escape the same note differently',
+    buildWebhookBody('{text_url}', payload) + ' | ' + buildWebhookBody('{text}', payload),
+    encodeURIComponent(payload.text) + ' | ' + 'Quote \\" and spaces'
+);
+
+section('Content-Type');
+check(
+    'unset falls back to application/json',
+    buildWebhookContentType(undefined),
+    'application/json'
+);
+check(
+    'blank falls back to application/json',
+    buildWebhookContentType('   '),
+    'application/json'
+);
+check(
+    'a configured type is sent as written, trimmed',
+    buildWebhookContentType(' application/x-www-form-urlencoded '),
+    'application/x-www-form-urlencoded'
 );
 
 process.stdout.write('\nPassed: ' + passed + '  Failed: ' + failed + '\n');
