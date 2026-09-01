@@ -1,5 +1,5 @@
 // Brain Dump — PebbleKit JS
-// Routes voice notes to Google Tasks / Notion / AI agent / Custom Webhook / Discord
+// Routes voice notes to Google Tasks / Notion / AI agent / Custom Webhook / Discord / Joplin
 // Intent classification runs locally; no extra API call needed for routing.
 
 var KEY_CONFIG  = 'brain_dump_cfg_v1';
@@ -115,6 +115,7 @@ function getEnabledDests(cfg) {
     if (cfg.discord_enabled) d.push('discord');
     if (cfg.nextcloud_enabled) d.push('nextcloud');
     if (cfg.nextcloud_tasks_enabled) d.push('nextcloud_tasks');
+    if (cfg.joplin_enabled)  d.push('joplin');
     return d;
 }
 
@@ -293,6 +294,17 @@ function classifyIntent(text, enabled, cfg) {
         });
         getCustomKeywords(cfg, 'discord').forEach(function(k) {
             if (t.indexOf(k) >= 0) scores['discord'] += 3;
+        });
+    }
+
+    // Joplin signals
+    if (scores['joplin'] !== undefined) {
+        noteSignals.forEach(function(p) { if (t.indexOf(p) >= 0) scores['joplin'] += 2; });
+        ['joplin', 'add to joplin', 'save to joplin'].forEach(function(k) {
+            if (t.indexOf(k) >= 0) scores['joplin'] += 4;
+        });
+        getCustomKeywords(cfg, 'joplin').forEach(function(k) {
+            if (t.indexOf(k) >= 0) scores['joplin'] += 2;
         });
     }
 
@@ -1292,6 +1304,181 @@ function sendToNextcloudTasks(text, cfg, cb) {
 }
 
 // ============================================================================
+// JOPLIN  (Data API — the clipper server of a Joplin client, not Joplin Server)
+// ============================================================================
+// Joplin Server is a sync backend and has no note API; what answers here is the
+// clipper server run by a Joplin client (headless CLI or desktop), which
+// authenticates by token in the query string rather than a header.
+
+var KEY_JOPLIN_TAGS = 'brain_dump_joplin_tags_v1';
+
+// Resolving a tag title to its id costs a search (and maybe a create). Titles
+// come from settings and rarely change, so cache the mapping and keep tagging
+// down to one request per tag. Keyed by instance URL: pointing the app at a
+// different Joplin invalidates every id.
+function getJoplinTagCache(base) {
+    try {
+        var c = JSON.parse(localStorage.getItem(KEY_JOPLIN_TAGS) || '{}');
+        return c.base === base && c.ids ? c.ids : {};
+    } catch (e) { return {}; }
+}
+function saveJoplinTagCache(base, ids) {
+    try { localStorage.setItem(KEY_JOPLIN_TAGS, JSON.stringify({ base: base, ids: ids })); }
+    catch (e) {}
+}
+
+function joplinUrl(base, path, token) {
+    return base + path + (path.indexOf('?') >= 0 ? '&' : '?') +
+           'token=' + encodeURIComponent(token);
+}
+
+// Settings hold a comma-separated list. Capped so a long list can't turn one
+// note into a burst of requests; the cap is stated in the settings page and
+// logged when it bites, so dropped tags are never silent.
+var JOPLIN_MAX_TAGS = 5;
+
+function joplinTagList(cfg) {
+    var tags = (cfg.joplin_tags || '').split(',')
+        .map(function(x) { return x.trim(); })
+        .filter(function(x) { return x.length > 0; });
+    if (tags.length > JOPLIN_MAX_TAGS) {
+        console.log('Joplin: only the first ' + JOPLIN_MAX_TAGS + ' tags are applied, ignoring: ' +
+                    tags.slice(JOPLIN_MAX_TAGS).join(', '));
+        tags = tags.slice(0, JOPLIN_MAX_TAGS);
+    }
+    return tags;
+}
+
+// Attach the configured tags to a just-created note. Deliberately fire-and-
+// forget: the note already exists, so a tagging failure must not reach the
+// send callback — the retry queue would replay the whole note and duplicate it
+// in Joplin (the failure mode fixed in ce8de53).
+function tagJoplinNote(base, token, noteId, tags) {
+    var ids = getJoplinTagCache(base);
+    var i = 0;
+
+    function next() {
+        if (i >= tags.length) { saveJoplinTagCache(base, ids); return; }
+        var title = tags[i++];
+        if (ids[title]) { attach(title, ids[title]); return; }
+        // Not cached: find the tag, creating it if Joplin doesn't have it yet.
+        var q = new XMLHttpRequest();
+        q.open('GET', joplinUrl(base, '/search?query=' + encodeURIComponent(title) + '&type=tag', token));
+        q.onload = function() {
+            var found = null;
+            try {
+                var d = JSON.parse(this.responseText);
+                if (d.items && d.items.length) found = d.items[0].id;
+            } catch (e) {}
+            if (found) { ids[title] = found; attach(title, found); }
+            else createTag(title);
+        };
+        q.onerror = function() { next(); };
+        q.send();
+    }
+
+    function createTag(title) {
+        var c = new XMLHttpRequest();
+        c.open('POST', joplinUrl(base, '/tags', token));
+        c.setRequestHeader('Content-Type', 'application/json');
+        c.onload = function() {
+            var id = null;
+            try { id = JSON.parse(this.responseText).id; } catch (e) {}
+            if (id) { ids[title] = id; attach(title, id); } else { next(); }
+        };
+        c.onerror = function() { next(); };
+        c.send(JSON.stringify({ title: title }));
+    }
+
+    function attach(title, tagId) {
+        var a = new XMLHttpRequest();
+        a.open('POST', joplinUrl(base, '/tags/' + encodeURIComponent(tagId) + '/notes', token));
+        a.setRequestHeader('Content-Type', 'application/json');
+        a.onload = function() {
+            // A stale cached id 404s — drop it so the next send re-resolves it.
+            if (this.status === 404) delete ids[title];
+            next();
+        };
+        a.onerror = function() { next(); };
+        a.send(JSON.stringify({ id: noteId }));
+    }
+
+    next();
+}
+
+// List the notebooks so the settings page can offer a picker instead of asking
+// for an opaque id. Always calls done() (with null on any failure) so settings
+// still opens if Joplin is unreachable.
+//
+// The Data API paginates, so follow has_more rather than showing a silently
+// truncated list — a missing notebook the user can't explain is worse than a
+// slightly slower settings screen. MAX_PAGES only guards against a server that
+// never stops saying has_more; whatever was collected so far is still used.
+function listJoplinFolders(url, token, done) {
+    var base = (url || '').replace(/\/$/, '');
+    var MAX_PAGES = 10;
+    var folders = [];
+    var finished = false;
+    function finish(f) { if (!finished) { finished = true; done(f); } }
+    // Any page that fails still yields the pages already fetched.
+    function stop() { finish(folders.length ? folders : null); }
+
+    function fetchPage(page) {
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', joplinUrl(base, '/folders?page=' + page, token));
+        xhr.timeout = 6000;
+        xhr.onload = function() {
+            if (this.status < 200 || this.status >= 300) { stop(); return; }
+            var d;
+            try { d = JSON.parse(this.responseText); } catch (e) { stop(); return; }
+            if (d.items && d.items.length) folders = folders.concat(d.items);
+            if (d.has_more && page < MAX_PAGES) fetchPage(page + 1);
+            else stop();
+        };
+        xhr.onerror   = stop;
+        xhr.ontimeout = stop;
+        xhr.send();
+    }
+
+    fetchPage(1);
+}
+
+function sendToJoplin(text, cfg, cb) {
+    var base  = (cfg.joplin_url || '').replace(/\/$/, '');
+    var token = cfg.joplin_token;
+    if (!base || !token) { cb(false, 'Joplin not configured'); return; }
+
+    var body = {
+        title:      text.substring(0, 80),
+        body:       text,
+        source_url: 'pebble://brain-dump'
+    };
+    if (cfg.joplin_notebook_id) body.parent_id = cfg.joplin_notebook_id;
+
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', joplinUrl(base, '/notes', token));
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.onload = function() {
+        if (this.status >= 200 && this.status < 300) {
+            var noteId = null;
+            try { noteId = JSON.parse(this.responseText).id; } catch (e) {}
+            // Report success first; tags are a best-effort follow-up.
+            cb(true, 'joplin');
+            var tags = joplinTagList(cfg);
+            if (noteId && tags.length) tagJoplinNote(base, token, noteId, tags);
+        } else if (this.status === 401 || this.status === 403) {
+            cb(false, 'Invalid token');
+        } else if (this.status === 404) {
+            cb(false, 'Notebook not found');
+        } else {
+            cb(false, 'Error ' + this.status);
+        }
+    };
+    xhr.onerror = function() { cb(false, 'Network error'); };
+    xhr.send(JSON.stringify(body));
+}
+
+// ============================================================================
 // TEXT CLEANING
 // ============================================================================
 
@@ -1451,12 +1638,12 @@ function stripDateTimeFromText(text) {
 // ROUTER
 // ============================================================================
 
-var DEST_INDEX = { tasks: 0, notion: 1, ai: 2, webhook: 3, local: 4, todoist: 5, nextcloud: 6, nextcloud_tasks: 7, discord: 8 };
+var DEST_INDEX = { tasks: 0, notion: 1, ai: 2, webhook: 3, local: 4, todoist: 5, nextcloud: 6, nextcloud_tasks: 7, discord: 8, joplin: 9 };
 
 // Destinations whose delivery can be safely retried or resumed later. 'ai' (a
 // live conversation) and 'local' (saved on-watch) are intentionally excluded
 // from the retry queue.
-var QUEUEABLE_DESTS = { tasks: 1, notion: 1, webhook: 1, todoist: 1, nextcloud: 1, nextcloud_tasks: 1, discord: 1 };
+var QUEUEABLE_DESTS = { tasks: 1, notion: 1, webhook: 1, todoist: 1, nextcloud: 1, nextcloud_tasks: 1, discord: 1, joplin: 1 };
 
 // Dispatch a note to a single cloud destination. Shared by the live router and
 // the retry-queue flush so both take exactly the same delivery path.
@@ -1469,6 +1656,7 @@ function sendToDest(dest, text, cfg, cb, retryState) {
         case 'todoist':         sendToTodoist       (text, cfg, cb); break;
         case 'nextcloud':       sendToNextcloud     (text, cfg, cb); break;
         case 'nextcloud_tasks': sendToNextcloudTasks(text, cfg, cb); break;
+        case 'joplin':          sendToJoplin        (text, cfg, cb); break;
         default:                cb(false, 'Unknown destination');
     }
 }
@@ -1521,7 +1709,7 @@ function routeAndSend(text, isFollowup) {
     // Original text is still used for routing, due-date extraction, and AI context.
     var sendText = cleanNoteText(text);
 
-    var DEST_LABEL = { tasks: 'Tasks', notion: 'Notion', ai: 'AI', webhook: 'Webhook', local: 'Local', todoist: 'Todoist', nextcloud: 'Nextcloud Notes', nextcloud_tasks: 'Nextcloud Tasks', discord: 'Discord' };
+    var DEST_LABEL = { tasks: 'Tasks', notion: 'Notion', ai: 'AI', webhook: 'Webhook', local: 'Local', todoist: 'Todoist', nextcloud: 'Nextcloud Notes', nextcloud_tasks: 'Nextcloud Tasks', discord: 'Discord', joplin: 'Joplin' };
 
     function onResult(ok, data, retryState) {
         if (!ok) {
@@ -1650,6 +1838,7 @@ function computeDestMask(cfg) {
     if (enabled.indexOf('nextcloud') >= 0) mask |= 64;
     if (enabled.indexOf('nextcloud_tasks') >= 0) mask |= 128;
     if (enabled.indexOf('discord')   >= 0) mask |= 256;
+    if (enabled.indexOf('joplin')    >= 0) mask |= 512;
     return mask;
 }
 
@@ -1784,7 +1973,39 @@ function openSettings() {
     function chk(v) { return v ? 'checked' : ''; }
     function sel(a, b) { return a === b ? 'selected' : ''; }
 
-    function render(notionStatus) {
+    // Notebook picker: a <select> when the pkjs probe could list the notebooks,
+    // otherwise a free-text id field. Both expose id "joplin_notebook_id" so
+    // buildCfg() reads whichever is present.
+    function joplinNotebookInput(folders) {
+        function txt(x) { return ('' + x).replace(/[<>&]/g, ''); }
+        if (!folders || !folders.length) {
+            return '<input type="text" id="joplin_notebook_id" value=\'' +
+                   esc(cfg.joplin_notebook_id) + '\' placeholder="notebook id (blank = default)">' +
+                   '<p class="note">Enable Joplin, fill in the URL and token, then save and reopen ' +
+                   'settings to pick a notebook from a list.</p>';
+        }
+        // Show each notebook by its full path so same-named children stay apart.
+        var byId = {};
+        folders.forEach(function(f) { byId[f.id] = f; });
+        function path(f, depth) {
+            var parent = (depth < 8 && f.parent_id) ? byId[f.parent_id] : null;
+            return parent ? path(parent, depth + 1) + ' / ' + f.title : f.title;
+        }
+        var opts = folders.map(function(f) {
+            return { id: f.id, label: path(f, 0) };
+        }).sort(function(a, b) { return a.label.localeCompare(b.label); });
+
+        var html = '<select id="joplin_notebook_id">' +
+                   '<option value="" ' + sel(cfg.joplin_notebook_id || '', '') + '>(default notebook)</option>';
+        opts.forEach(function(o) {
+            html += '<option value="' + txt(o.id) + '" ' + sel(cfg.joplin_notebook_id, o.id) +
+                    '>' + txt(o.label) + '</option>';
+        });
+        return html + '</select>';
+    }
+
+    function render(notionStatus, joplinFolders) {
+    var joplinNotebookField = joplinNotebookInput(joplinFolders);
     var html = '<!DOCTYPE html><html><head>' +
     '<meta name="viewport" content="width=device-width,initial-scale=1">' +
     '<style>' +
@@ -1832,6 +2053,7 @@ function openSettings() {
     '<option value="nextcloud_tasks" ' + sel(cfg.default_dest,'nextcloud_tasks') + '>Nextcloud Tasks</option>' +
     '<option value="webhook"   ' + sel(cfg.default_dest,'webhook')   + '>Webhook</option>' +
     '<option value="discord"   ' + sel(cfg.default_dest,'discord')   + '>Discord</option>' +
+    '<option value="joplin"    ' + sel(cfg.default_dest,'joplin')    + '>Joplin</option>' +
     '</select></label>' +
     '</div>' +
 
@@ -1991,6 +2213,22 @@ function openSettings() {
     ' value=\'' + esc(cfg.discord_keywords) + '\' placeholder="discord, post to discord, ...">' +
     '</div></div>' +
 
+    // ---- Joplin ----
+    '<div class="section" id="sec_joplin">' +
+    '<label class="toggle-label"><input type="checkbox" id="joplin_enabled" ' + chk(cfg.joplin_enabled) + '>' +
+    ' Joplin</label>' +
+    '<div class="fields">' +
+    'Web Clipper URL:<input type="text" id="joplin_url" value=\'' + esc(cfg.joplin_url) + '\' placeholder="https://joplin.example.com">' +
+    '<p class="note">Needs a Joplin <b>client</b> with the Web Clipper service on (desktop, or the CLI running headless) &mdash; Joplin Server alone has no note API. Use HTTPS: the token travels in the query string.</p>' +
+    'API token:<input type="password" id="joplin_token" value=\'' + esc(cfg.joplin_token) + '\'>' +
+    '<p class="note">Joplin &rarr; Options &rarr; Web Clipper, or <code>joplin config api.token</code> on the CLI.</p>' +
+    'Notebook:' + joplinNotebookField +
+    'Tags (comma-separated, optional, max ' + JOPLIN_MAX_TAGS + '):<input type="text" id="joplin_tags"' +
+    ' value=\'' + esc(cfg.joplin_tags) + '\' placeholder="pebble, inbox">' +
+    'Routing keywords (comma-separated, added to defaults):<input type="text" id="joplin_keywords"' +
+    ' value=\'' + esc(cfg.joplin_keywords) + '\' placeholder="joplin, save to joplin, ...">' +
+    '</div></div>' +
+
     '<div class="save-bar"><button onclick="save()">Save</button></div>' +
 
     '<script>' +
@@ -2080,7 +2318,7 @@ function openSettings() {
     'function updateRoutingUI(){' +
       'var off=document.getElementById("disable_smart_routing").checked;' +
       'var def=document.getElementById("default_dest").value;' +
-      '["tasks","todoist","notion","nextcloud","nextcloud_tasks","ai","webhook","discord"].forEach(function(d){' +
+      '["tasks","todoist","notion","nextcloud","nextcloud_tasks","ai","webhook","discord","joplin"].forEach(function(d){' +
         'var el=document.getElementById("sec_"+d);if(!el)return;' +
         'var dim=off&&d!==def;' +
         'el.style.opacity=dim?"0.5":"";' +
@@ -2195,7 +2433,13 @@ function openSettings() {
     'webhook_keywords:document.getElementById("webhook_keywords").value.trim(),' +
     'discord_enabled:document.getElementById("discord_enabled").checked,' +
     'discord_url:document.getElementById("discord_url").value.trim(),' +
-    'discord_keywords:document.getElementById("discord_keywords").value.trim()' +
+    'discord_keywords:document.getElementById("discord_keywords").value.trim(),' +
+    'joplin_enabled:document.getElementById("joplin_enabled").checked,' +
+    'joplin_url:document.getElementById("joplin_url").value.trim(),' +
+    'joplin_token:document.getElementById("joplin_token").value.trim(),' +
+    'joplin_notebook_id:document.getElementById("joplin_notebook_id").value.trim(),' +
+    'joplin_tags:document.getElementById("joplin_tags").value.trim(),' +
+    'joplin_keywords:document.getElementById("joplin_keywords").value.trim()' +
     '};' +
     '}' +
     'function save(){' +
@@ -2213,13 +2457,26 @@ function openSettings() {
     Pebble.openURL('data:text/html,' + encodeURIComponent(html));
     }
 
-    // Verify a saved Notion target in pkjs (no CORS) before opening, so the page
-    // shows what it resolved to. Skip (open instantly) when Notion isn't set up.
+    // Both probes run in pkjs, not the webview: the settings page is a data: URL
+    // and CORS keeps it from reaching either API itself.
+    // Verify a saved Notion target so the page shows what it resolved to, then
+    // list Joplin's notebooks so the picker can be a real list. Each step is
+    // skipped (and its result left empty) when that service isn't set up.
+    function withJoplinFolders(notionStatus) {
+        if (!cfg.joplin_enabled || !cfg.joplin_url || !cfg.joplin_token) {
+            render(notionStatus, null);
+            return;
+        }
+        listJoplinFolders(cfg.joplin_url, cfg.joplin_token, function(folders) {
+            render(notionStatus, folders);
+        });
+    }
+
     var nId = extractNotionPageId(cfg.notion_page_id);
     if (cfg.notion_enabled && cfg.notion_token && nId) {
-        detectNotionForConfig(cfg.notion_token, nId, (cfg.notion_title_prop || '').trim(), render);
+        detectNotionForConfig(cfg.notion_token, nId, (cfg.notion_title_prop || '').trim(), withJoplinFolders);
     } else {
-        render('');
+        withJoplinFolders('');
     }
 }
 
