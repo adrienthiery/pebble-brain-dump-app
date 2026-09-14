@@ -202,40 +202,68 @@ function stripDateTimeFromText(text) {
         'next\\s+|this\\s+)?';
     var TL = '(?:at\\s+|um\\s+|gegen\\s+|\\xe0\\s+|a\\s+las\\s+|a\\s+)?';
 
-    function R(body) { return new RegExp('[,.]?\\s+' + body + '$', 'i'); }
+    function tailOnly(re) { return { re: re, tailOnly: true }; }
 
-    function stripTrailing(s) {
-        return s
-            .replace(R(TL + '\\d{1,2}(?::\\d{2})?\\s*[ap]\\.?\\s?m\\.?'), '')
-            .replace(R(TL + '(?:[01]?\\d|2[0-3]):[0-5]\\d'), '')
-            .replace(R(TL + '\\d{1,2}h\\s?\\d{0,2}'), '')
-            .replace(R(TL + '\\d{1,2}\\s+(?:heures?|uhr)(?:\\s+\\d{1,2})?'), '')
-            .replace(R(TL + '(?:noon|midnight|lunchtime)'), '')
-            .replace(R('(?:in\\s+the\\s+)?(?:this\\s+)?(?:morning|afternoon|evening)'), '')
-            .replace(R('(?:at\\s+)?(?:tonight|midnight|noon|lunchtime)'), '')
-            .replace(R('(?:at\\s+)?(?:dinner|breakfast|lunch)(?:time)?'), '')
-            .replace(R('(?:heute\\s+(?:morgen|abend|nacht|nachmittag)|morgens|abends)'), '')
-            .replace(R('(?:um\\s+)?(?:mittag|mitternacht)'), '')
-            .replace(R('(?:ce\\s+matin|cet?\\s+apr[e\\xe8]s-midi|ce\\s+soir)'), '')
-            .replace(R('(?:esta\\s+(?:ma[n\\xf1]ana|tarde|noche)|por\\s+la\\s+(?:ma[n\\xf1]ana|tarde|noche))'), '')
-            .replace(R(DL + 'tomorrow'), '')
-            .replace(R(DL + 'today'), '')
-            .replace(R(DL + '(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)'), '')
-            .replace(R('(?:by\\s+)?(?:end\\s+of\\s+)?(?:this\\s+week|this\\s+month|next\\s+week|next\\s+month)'), '')
-            .replace(R(DL + '(?:morgen|[\\xfcu]bermorgen)'), '')
-            .replace(R(DL + '(?:montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonnabend|sonntag)'), '')
-            .replace(R('n[\\xe4a]chste[rn]?\\s+(?:woche|monat)'), '')
-            .replace(R(DL + 'demain'), '')
-            .replace(R(DL + '(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)'), '')
-            .replace(R('la\\s+semaine\\s+prochaine'), '')
-            .replace(R(DL + 'ma[n\\xf1]ana'), '')
-            .replace(R(DL + '(?:lunes|martes|mi[e\\xe9]rcoles|jueves|viernes|s[a\\xe1]bado|domingo)'), '')
-            .trim();
+    var PHRASES = [
+        TL + '\\d{1,2}(?::\\d{2})?\\s*[ap]\\.?\\s?m\\.?',
+        TL + '(?:[01]?\\d|2[0-3]):[0-5]\\d',
+        TL + '\\d{1,2}h\\s?\\d{0,2}',
+        TL + '\\d{1,2}\\s+(?:heures?|uhr)(?:\\s+\\d{1,2})?',
+        TL + '(?:noon|midnight|lunchtime)',
+        tailOnly('(?:in\\s+the\\s+)?(?:this\\s+)?(?:morning|afternoon|evening)'),
+        '(?:at\\s+)?(?:tonight|midnight|noon|lunchtime)',
+        tailOnly('(?:at\\s+)?(?:dinner|breakfast|lunch)(?:time)?'),
+        '(?:heute\\s+(?:morgen|abend|nacht|nachmittag)|morgens|abends)',
+        tailOnly('(?:um\\s+)?(?:mittag|mitternacht)'),
+        '(?:ce\\s+matin|cet?\\s+apr[e\\xe8]s-midi|ce\\s+soir)',
+        '(?:esta\\s+(?:ma[n\\xf1]ana|tarde|noche)|por\\s+la\\s+(?:ma[n\\xf1]ana|tarde|noche))',
+        DL + 'tomorrow',
+        DL + 'today',
+        DL + '(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)',
+        '(?:by\\s+)?(?:end\\s+of\\s+)?(?:this\\s+week|this\\s+month|next\\s+week|next\\s+month)',
+        DL + '(?:morgen|[\\xfcu]bermorgen)',
+        DL + '(?:montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonnabend|sonntag)',
+        'n[\\xe4a]chste[rn]?\\s+(?:woche|monat)',
+        DL + 'demain',
+        DL + '(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)',
+        'la\\s+semaine\\s+prochaine',
+        DL + 'ma[n\\xf1]ana',
+        DL + '(?:lunes|martes|mi[e\\xe9]rcoles|jueves|viernes|s[a\\xe1]bado|domingo)'
+    ];
+    var TRAILING = PHRASES.map(function(p) {
+        return new RegExp('[,.]?\\s+' + (p.tailOnly ? p.re : p) + '$', 'i');
+    });
+    var LEADING = PHRASES.map(function(p) {
+        return p.tailOnly ? null : new RegExp('^' + p + '[,.]?\\s+', 'i');
+    });
+
+    function stripOnce(s, patterns) {
+        for (var i = 0; i < patterns.length; i++) {
+            if (patterns[i]) s = s.replace(patterns[i], '').trim();
+        }
+        return s;
+    }
+    function stripUntilStable(s, patterns) {
+        for (var k = 0; k < 4; k++) {
+            var prev = s;
+            s = stripOnce(s, patterns);
+            if (s === prev) break;
+        }
+        return s;
     }
 
-    var t = original, prev;
-    for (var k = 0; k < 4; k++) { prev = t; t = stripTrailing(t); if (t === prev) break; }
-    return (t.length >= 3) ? t : original;
+    var bare = original.replace(/[\s.!?]+$/, '');
+    var t = stripUntilStable(bare, TRAILING);
+
+    var CONNECTOR = /^(?:to|that)\s+/i;
+    var lead = stripUntilStable(t, LEADING);
+    if (lead !== t && (t === bare || CONNECTOR.test(lead))) {
+        t = lead.replace(CONNECTOR, '');
+        if (bare.charAt(0) !== bare.charAt(0).toLowerCase()) {
+            t = t.charAt(0).toUpperCase() + t.slice(1);
+        }
+    }
+    return (t !== bare && t.length >= 3) ? t : original;
 }
 
 // ============================================================
@@ -557,7 +585,16 @@ checkStr('pour + à Xh',      stripDateTimeFromText('rendre le rapport pour same
 section('stripDateTimeFromText — Spanish');
 checkStr('para el + a las',  stripDateTimeFromText('comprar leche para el sábado a las 3 pm'), 'comprar leche');
 
+section('stripDateTimeFromText — dictated word order and punctuation');
+checkStr('trailing period',          stripDateTimeFromText('Send invoice by Friday 15:00.'),        'Send invoice');
+checkStr('leading day + time',       stripDateTimeFromText('Tomorrow at 3 pm call the bank'),       'Call the bank');
+checkStr('leading time + "to"',      stripDateTimeFromText('At 3 pm to call the bank tomorrow'),    'Call the bank');
+checkStr('leading German date/time', stripDateTimeFromText('Morgen um 9 Uhr Bericht schicken'),     'Bericht schicken');
+
 section('stripDateTimeFromText — safety (do not remove valuable text)');
+checkStr('leading day kept once a tail came off', stripDateTimeFromText('Monday meeting notes due Friday'), 'Monday meeting notes');
+checkStr('noun-like word not trimmed from the front', stripDateTimeFromText('Dinner on Friday with Sam'), 'Dinner on Friday with Sam');
+checkStr('no date → punctuation kept', stripDateTimeFromText('call mom about the invoice.'), 'call mom about the invoice.');
 checkStr('no date → unchanged',      stripDateTimeFromText('call mom about the invoice'),   'call mom about the invoice');
 checkStr('trailing particle kept',   stripDateTimeFromText('turn the heater on'),           'turn the heater on');
 checkStr('date word is the content', stripDateTimeFromText('Saturday'),                     'Saturday');

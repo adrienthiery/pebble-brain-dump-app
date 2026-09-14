@@ -48,6 +48,7 @@
 #define DEST_NEXTCLOUD_TASKS 7
 #define DEST_DISCORD   8
 #define DEST_JOPLIN    9
+#define DEST_TIMELINE  10
 
 // Destination bitmask bits (must match pkjs DEST_MASK)
 #define DEST_BIT_TASKS     (1 << DEST_TASKS)
@@ -59,6 +60,7 @@
 #define DEST_BIT_NEXTCLOUD_TASKS (1 << DEST_NEXTCLOUD_TASKS)
 #define DEST_BIT_DISCORD   (1 << DEST_DISCORD)
 #define DEST_BIT_JOPLIN    (1 << DEST_JOPLIN)
+#define DEST_BIT_TIMELINE  (1 << DEST_TIMELINE)
 
 // Ink theme — strict black & white
 #define C_SCREEN   GColorBlack
@@ -321,6 +323,7 @@ static const char *dest_full_name(int dest) {
         case DEST_NEXTCLOUD_TASKS: return "Nextcloud Tasks";
         case DEST_DISCORD:   return "Discord";
         case DEST_JOPLIN:    return "Joplin";
+        case DEST_TIMELINE:  return "Timeline";
         default:             return "?";
     }
 }
@@ -1113,6 +1116,7 @@ static void draw_dest_glyph(GContext *ctx, int dest, GPoint c, GColor fg) {
         case DEST_NEXTCLOUD_TASKS: draw_glyph_letter(ctx, 'C', c, fg); break;
         case DEST_DISCORD:   draw_glyph_letter(ctx, 'D', c, fg); break;
         case DEST_JOPLIN:    draw_glyph_letter(ctx, 'J', c, fg); break;
+        case DEST_TIMELINE:  draw_glyph_letter(ctx, 'R', c, fg); break;
         default:             draw_glyph_letter(ctx, '?', c, fg); break;
     }
 }

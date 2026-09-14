@@ -1,5 +1,5 @@
 // Brain Dump — PebbleKit JS
-// Routes voice notes to Google Tasks / Notion / AI agent / Custom Webhook / Discord / Joplin
+// Routes voice notes to Google Tasks / Notion / AI agent / Custom Webhook / Discord / Joplin / Pebble Timeline
 // Intent classification runs locally; no extra API call needed for routing.
 
 var KEY_CONFIG  = 'brain_dump_cfg_v1';
@@ -116,6 +116,7 @@ function getEnabledDests(cfg) {
     if (cfg.nextcloud_enabled) d.push('nextcloud');
     if (cfg.nextcloud_tasks_enabled) d.push('nextcloud_tasks');
     if (cfg.joplin_enabled)  d.push('joplin');
+    if (cfg.timeline_enabled) d.push('timeline');
     return d;
 }
 
@@ -305,6 +306,23 @@ function classifyIntent(text, enabled, cfg) {
         });
         getCustomKeywords(cfg, 'joplin').forEach(function(k) {
             if (t.indexOf(k) >= 0) scores['joplin'] += 2;
+        });
+    }
+
+    // Timeline signals — a reminder only makes sense at a moment, so an explicit
+    // reminder word plus a spoken time outweighs the generic task signals.
+    if (scores['timeline'] !== undefined) {
+        ['remind', 'alarm', 'erinner', 'wecker', 'rappel', 'r\xe9veil', 'reveil',
+         'recu\xe9rdame', 'recuerdame', 'recordatorio'].forEach(function(p) {
+            if (t.indexOf(p) >= 0) scores['timeline'] += 3;
+        });
+        tw.forEach(function(w) { if (t.indexOf(w) >= 0) scores['timeline'] += 1; });
+        if (extractTime(text)) scores['timeline'] += 2;
+        ['timeline', 'pin it', 'on my watch'].forEach(function(k) {
+            if (t.indexOf(k) >= 0) scores['timeline'] += 4;
+        });
+        getCustomKeywords(cfg, 'timeline').forEach(function(k) {
+            if (t.indexOf(k) >= 0) scores['timeline'] += 2;
         });
     }
 
@@ -1518,6 +1536,103 @@ function sendToJoplin(text, cfg, cb) {
 }
 
 // ============================================================================
+// PEBBLE TIMELINE  (a reminder pin on the watch's own timeline)
+// ============================================================================
+// Pins go through the public timeline web API, authenticated by the per-user,
+// per-app token pkjs hands out — nothing for the user to configure.
+//
+// Keep the Rebble host even though the Core Devices app is rePebble: that app
+// intercepts PUTs to timeline-api.rebble.io (and the legacy getpebble.com host)
+// and writes the pin straight to the watch without any cloud round-trip, as
+// long as "emulate remote timeline" is on (the default). It then hands out a
+// placeholder token, so sideloads work too. With emulation off, or on the
+// Rebble app, the pin goes to Rebble's cloud and needs an appstore-issued token.
+
+var TIMELINE_API_URL = 'https://timeline-api.rebble.io/v1/user/pins/';
+var TIMELINE_ICON    = 'system://images/NOTIFICATION_REMINDER';
+
+// A note that names a day but no time still needs a moment to ring.
+var TIMELINE_DEFAULT_HOUR = 9;
+
+// Resolve the note's due date/time to an absolute instant in ms, or null when
+// it names neither. extractDueDate already falls back to today for a bare time;
+// its date is read as a local date, as formatDueLabel does.
+function timelinePinTime(text) {
+    var iso = extractDueDate(text);
+    if (!iso) return null;
+    var tm = extractTime(text);
+    var dp = iso.substring(0, 10).split('-');
+    return new Date(parseInt(dp[0], 10), parseInt(dp[1], 10) - 1, parseInt(dp[2], 10),
+                    tm ? tm.h : TIMELINE_DEFAULT_HOUR, tm ? tm.m : 0).getTime();
+}
+
+// Deterministic per note: a queued retry re-PUTs the same id, which the API
+// treats as an update, so a send that landed but whose response was lost never
+// leaves a duplicate pin behind.
+function timelinePinId(text, timestamp) {
+    var h = 5381;
+    for (var i = 0; i < text.length; i++) h = ((h * 33) ^ text.charCodeAt(i)) >>> 0;
+    return 'braindump-' + timestamp + '-' + h.toString(36);
+}
+
+function buildTimelinePin(text, pinTime, id, now) {
+    var title = stripDateTimeFromText(text);
+    var time  = new Date(pinTime).toISOString();
+    var layout = { type: 'genericPin', title: title, tinyIcon: TIMELINE_ICON };
+    // The title lost its date/time tail; keep the full dictation one tap away.
+    if (title !== text) layout.body = text;
+    var pin = { id: id, time: time, layout: layout };
+    // A reminder already in the past would never ring; the pin still records it.
+    if (pinTime > now) {
+        pin.reminders = [{
+            time: time,
+            layout: { type: 'genericReminder', title: title, tinyIcon: TIMELINE_ICON }
+        }];
+    }
+    return pin;
+}
+
+function sendToTimeline(text, cfg, cb, retryState) {
+    var timestamp = (retryState && retryState.timestamp) || Math.floor(Date.now() / 1000);
+    // Resolved once and carried in retryState: "at 3pm" queued today and
+    // retried tomorrow must still mean the day it was dictated.
+    var pinTime = (retryState && retryState.pinTime) || timelinePinTime(text);
+    if (!pinTime) { cb(false, 'No date or time in note'); return; }
+    var state = { timestamp: timestamp, pinTime: pinTime };
+
+    if (typeof Pebble.getTimelineToken !== 'function') {
+        cb(false, 'Timeline unavailable', state);
+        return;
+    }
+    Pebble.getTimelineToken(function(token) {
+        var pin = buildTimelinePin(text, pinTime, timelinePinId(text, timestamp), Date.now());
+        var xhr = new XMLHttpRequest();
+        xhr.open('PUT', TIMELINE_API_URL + encodeURIComponent(pin.id));
+        xhr.setRequestHeader('Content-Type', 'application/json');
+        xhr.setRequestHeader('X-User-Token', token);
+        xhr.onload = function() {
+            if (this.status >= 200 && this.status < 300) {
+                cb(true, 'timeline');
+            } else if (this.status === 400) {
+                console.log('Timeline 400: ' + this.responseText);
+                cb(false, 'Pin rejected', state);
+            } else if (this.status === 410) {
+                cb(false, 'Timeline token invalid', state);
+            } else if (this.status === 429) {
+                cb(false, 'Rate limited', state);
+            } else {
+                cb(false, 'Error ' + this.status, state);
+            }
+        };
+        xhr.onerror = function() { cb(false, 'Network error', state); };
+        xhr.send(JSON.stringify(pin));
+    }, function(err) {
+        console.log('Timeline token error: ' + err);
+        cb(false, 'Timeline unavailable', state);
+    });
+}
+
+// ============================================================================
 // TEXT CLEANING
 // ============================================================================
 
@@ -1536,13 +1651,17 @@ function cleanNoteText(text) {
         /^(?:don'?t|do\s+not)\s+forget\s+(?:to\s+|that\s+|about\s+)?/i,
         /^remember\s+(?:to\s+|that\s+)?/i,
         /^i\s+(?:need|have|must|should|want)\s+to\s+/i,
+        // EN — "add to <service>" and reminder labels come before the bare "add"
+        // below, which would otherwise win and leave "to notion …" behind.
+        /^(?:add|save|send|log|put|pin)(?:\s+(?:this|it))?(?:\s+to|\s+in|\s+on)\s+(?:notion|todoist|nextcloud|google\s+tasks?|my\s+(?:notes?|list|tasks?)|(?:my\s+)?to-?do\s+list|(?:my\s+)?timeline)[: ,]\s*/i,
+        /^(?:(?:set|create|add)\s+(?:a\s+)?)?reminder(?:\s+(?:to|that|about|for))?[: ,]\s*/i,
         /^(?:add|put|write\s+down)\s+/i,
         // EN — note/idea labels
         /^(?:quick\s+)?note(?:\s+to\s+(?:my)?self)?[: ]\s*/i,
         /^ideas?[: ]\s*/i,
         /^memo[: ]\s*/i,
         /^task[: ]\s*/i,
-        /^(?:add|save|send|log)(?:\s+(?:this|it))?(?:\s+to|\s+in)\s+(?:notion|todoist|nextcloud|google\s+tasks?|my\s+(?:notes?|list|tasks?)|(?:my\s+)?to-?do\s+list)[: ,]\s*/i,
+        /^timeline[: ,]\s*/i,
         /^ask(?:\s+the)?\s+(?:ai|claude|gpt|assistant)[: ]\s*/i,
         // DE
         /^(?:kannst\s+du\s+mich\s+)?erinn?er(?:e)?\s+mich(?:\s+daran)?\s*(?:,\s*)?(?:zu\s+)?/i,
@@ -1584,6 +1703,7 @@ function cleanNoteText(text) {
         /[,.]?\s+(?:to|in|on)\s+(?:my\s+)?(?:todo|to-?do|shopping|task|reminder|grocery|groceries)\s+list\.?$/i,
         /[,.]?\s+(?:to|in)\s+(?:todoist|notion|nextcloud|google\s+tasks?|my\s+notes?|tasks?)\.?$/i,
         /[,.]?\s+(?:to|on)\s+my\s+list\.?$/i,
+        /[,.]?\s+(?:to|in|on)\s+(?:my\s+)?timeline\.?$/i,
         // DE
         /[,.]?\s+(?:zu|in|auf)\s+(?:mein(?:er|e)?\s+)?(?:todo|aufgaben?|einkaufs?|erinnerungs?)(?:\s*-?\s*liste?)?\.?$/i,
         /[,.]?\s+(?:in|zu)\s+(?:todoist|notion|nextcloud)\.?$/i,
@@ -1606,83 +1726,119 @@ function cleanNoteText(text) {
     return t;
 }
 
-// Strip trailing date/time expressions from task titles (content captured in due field).
-// Only used for task-manager destinations (Google Tasks, Todoist) — notes keep full text.
-// Remove a trailing due-date / time tail from a task title, so "Buy milk due
-// Saturday at 3 pm" becomes "Buy milk". Multilingual (EN/DE/FR/ES).
+// Remove a due-date / time phrase from a task or reminder title, so "Buy milk
+// due Saturday at 3 pm" becomes "Buy milk" and "Tomorrow at 3pm to call mom"
+// becomes "Call mom". Multilingual (EN/DE/FR/ES). Only used for destinations
+// that capture the date elsewhere (task managers, timeline) — notes keep full text.
 //
-// SAFETY MODEL — this only ever trims a trailing date/time tail:
+// SAFETY MODEL — this only ever trims a date/time phrase at either end:
 //   1. Callers only invoke it when extractDueDate() actually found a date.
-//   2. Every pattern is anchored to end-of-string ($): mid-sentence text is
-//      never touched.
+//   2. Every pattern is anchored to the start or the end of the string:
+//      mid-sentence text is never touched.
 //   3. A connector word (due / by / fällig / pour / para …) is baked into each
 //      date pattern as an OPTIONAL lead-in, so it is only removed together with
 //      the date token it introduces — a bare "on"/"for" with no date after it
 //      survives ("turn the heater on" keeps "on").
-//   4. If the result would be shorter than 3 chars, the original is kept.
+//   4. A leading phrase is trimmed only when nothing trailed, or when "to" /
+//      "that" follows it ("at 3pm to call mom"): once a date came off the end,
+//      "Monday meeting notes due Friday" keeps its "Monday". Words that double
+//      as nouns (dinner, morning, Mittag) are only ever trimmed from the end.
+//   5. If nothing was trimmed, or the result would be shorter than 3 chars, the
+//      original is kept — punctuation included.
 function stripDateTimeFromText(text) {
     var original = text.trim();
 
-    // Optional connector introducing a trailing date, per language.
+    // Optional connector introducing a date, per language.
     var DL =
         '(?:due\\s+|by\\s+|on\\s+|for\\s+|before\\s+|until\\s+|till\\s+|no\\s+later\\s+than\\s+|' + // EN
         'f[\\xe4a]llig\\s+am\\s+|f[\\xe4a]llig\\s+|bis\\s+zum\\s+|bis\\s+|am\\s+|n[\\xe4a]chste[rn]?\\s+|' + // DE
         'pour\\s+le\\s+|pour\\s+|avant\\s+le\\s+|avant\\s+|d\'ici\\s+|le\\s+|' + // FR
         'para\\s+el\\s+|para\\s+|antes\\s+del?\\s+|hasta\\s+el\\s+|hasta\\s+|el\\s+|' + // ES
         'next\\s+|this\\s+)?';
-    // Optional connector before a trailing time ("at 3", "um 15 Uhr", "à 15h", "a las 3").
+    // Optional connector before a time ("at 3", "um 15 Uhr", "à 15h", "a las 3").
     var TL = '(?:at\\s+|um\\s+|gegen\\s+|\\xe0\\s+|a\\s+las\\s+|a\\s+)?';
 
-    function R(body) { return new RegExp('[,.]?\\s+' + body + '$', 'i'); }
+    // Words that read as a noun when they open a title ("Dinner with Sam …").
+    function tailOnly(re) { return { re: re, tailOnly: true }; }
 
-    function stripTrailing(s) {
-        return s
-            // ── Trailing time ──
-            .replace(R(TL + '\\d{1,2}(?::\\d{2})?\\s*[ap]\\.?\\s?m\\.?'), '')          // 3 pm / at 3:30 p.m.
-            .replace(R(TL + '(?:[01]?\\d|2[0-3]):[0-5]\\d'), '')                        // 15:00 / at 15:00
-            .replace(R(TL + '\\d{1,2}h\\s?\\d{0,2}'), '')                               // 15h / à 6h30
-            .replace(R(TL + '\\d{1,2}\\s+(?:heures?|uhr)(?:\\s+\\d{1,2})?'), '')        // um 15 Uhr / à 6 heures
-            .replace(R(TL + '(?:noon|midnight|lunchtime)'), '')
-            .replace(R('(?:in\\s+the\\s+)?(?:this\\s+)?(?:morning|afternoon|evening)'), '')
-            .replace(R('(?:at\\s+)?(?:tonight|midnight|noon|lunchtime)'), '')
-            .replace(R('(?:at\\s+)?(?:dinner|breakfast|lunch)(?:time)?'), '')
-            .replace(R('(?:heute\\s+(?:morgen|abend|nacht|nachmittag)|morgens|abends)'), '')
-            .replace(R('(?:um\\s+)?(?:mittag|mitternacht)'), '')
-            .replace(R('(?:ce\\s+matin|cet?\\s+apr[e\\xe8]s-midi|ce\\s+soir)'), '')
-            .replace(R('(?:esta\\s+(?:ma[n\\xf1]ana|tarde|noche)|por\\s+la\\s+(?:ma[n\\xf1]ana|tarde|noche))'), '')
-            // ── Trailing date ──
-            .replace(R(DL + 'tomorrow'), '')
-            .replace(R(DL + 'today'), '')
-            .replace(R(DL + '(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)'), '')
-            .replace(R('(?:by\\s+)?(?:end\\s+of\\s+)?(?:this\\s+week|this\\s+month|next\\s+week|next\\s+month)'), '')
-            .replace(R(DL + '(?:morgen|[\\xfcu]bermorgen)'), '')
-            .replace(R(DL + '(?:montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonnabend|sonntag)'), '')
-            .replace(R('n[\\xe4a]chste[rn]?\\s+(?:woche|monat)'), '')
-            .replace(R(DL + 'demain'), '')
-            .replace(R(DL + '(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)'), '')
-            .replace(R('la\\s+semaine\\s+prochaine'), '')
-            .replace(R(DL + 'ma[n\\xf1]ana'), '')
-            .replace(R(DL + '(?:lunes|martes|mi[e\\xe9]rcoles|jueves|viernes|s[a\\xe1]bado|domingo)'), '')
-            .trim();
+    var PHRASES = [
+        // ── Time ──
+        TL + '\\d{1,2}(?::\\d{2})?\\s*[ap]\\.?\\s?m\\.?',          // 3 pm / at 3:30 p.m.
+        TL + '(?:[01]?\\d|2[0-3]):[0-5]\\d',                        // 15:00 / at 15:00
+        TL + '\\d{1,2}h\\s?\\d{0,2}',                               // 15h / à 6h30
+        TL + '\\d{1,2}\\s+(?:heures?|uhr)(?:\\s+\\d{1,2})?',        // um 15 Uhr / à 6 heures
+        TL + '(?:noon|midnight|lunchtime)',
+        tailOnly('(?:in\\s+the\\s+)?(?:this\\s+)?(?:morning|afternoon|evening)'),
+        '(?:at\\s+)?(?:tonight|midnight|noon|lunchtime)',
+        tailOnly('(?:at\\s+)?(?:dinner|breakfast|lunch)(?:time)?'),
+        '(?:heute\\s+(?:morgen|abend|nacht|nachmittag)|morgens|abends)',
+        tailOnly('(?:um\\s+)?(?:mittag|mitternacht)'),
+        '(?:ce\\s+matin|cet?\\s+apr[e\\xe8]s-midi|ce\\s+soir)',
+        '(?:esta\\s+(?:ma[n\\xf1]ana|tarde|noche)|por\\s+la\\s+(?:ma[n\\xf1]ana|tarde|noche))',
+        // ── Date ──
+        DL + 'tomorrow',
+        DL + 'today',
+        DL + '(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)',
+        '(?:by\\s+)?(?:end\\s+of\\s+)?(?:this\\s+week|this\\s+month|next\\s+week|next\\s+month)',
+        DL + '(?:morgen|[\\xfcu]bermorgen)',
+        DL + '(?:montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonnabend|sonntag)',
+        'n[\\xe4a]chste[rn]?\\s+(?:woche|monat)',
+        DL + 'demain',
+        DL + '(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)',
+        'la\\s+semaine\\s+prochaine',
+        DL + 'ma[n\\xf1]ana',
+        DL + '(?:lunes|martes|mi[e\\xe9]rcoles|jueves|viernes|s[a\\xe1]bado|domingo)'
+    ];
+    var TRAILING = PHRASES.map(function(p) {
+        return new RegExp('[,.]?\\s+' + (p.tailOnly ? p.re : p) + '$', 'i');
+    });
+    var LEADING = PHRASES.map(function(p) {
+        return p.tailOnly ? null : new RegExp('^' + p + '[,.]?\\s+', 'i');
+    });
+
+    function stripOnce(s, patterns) {
+        for (var i = 0; i < patterns.length; i++) {
+            if (patterns[i]) s = s.replace(patterns[i], '').trim();
+        }
+        return s;
     }
-
     // Loop until stable — handles any order of interleaved date/time/connector
     // tokens, e.g. "due Saturday at 3pm" or "fällig am Samstag um 15 Uhr".
-    var t = original, prev;
-    for (var k = 0; k < 4; k++) { prev = t; t = stripTrailing(t); if (t === prev) break; }
-    return (t.length >= 3) ? t : original;
+    function stripUntilStable(s, patterns) {
+        for (var k = 0; k < 4; k++) {
+            var prev = s;
+            s = stripOnce(s, patterns);
+            if (s === prev) break;
+        }
+        return s;
+    }
+
+    // Dictation closes the sentence with a period, which would hide a date at the end.
+    var bare = original.replace(/[\s.!?]+$/, '');
+    var t = stripUntilStable(bare, TRAILING);
+
+    var CONNECTOR = /^(?:to|that)\s+/i;
+    var lead = stripUntilStable(t, LEADING);
+    if (lead !== t && (t === bare || CONNECTOR.test(lead))) {
+        t = lead.replace(CONNECTOR, '');
+        // The date took the capital letter with it.
+        if (bare.charAt(0) !== bare.charAt(0).toLowerCase()) {
+            t = t.charAt(0).toUpperCase() + t.slice(1);
+        }
+    }
+    return (t !== bare && t.length >= 3) ? t : original;
 }
 
 // ============================================================================
 // ROUTER
 // ============================================================================
 
-var DEST_INDEX = { tasks: 0, notion: 1, ai: 2, webhook: 3, local: 4, todoist: 5, nextcloud: 6, nextcloud_tasks: 7, discord: 8, joplin: 9 };
+var DEST_INDEX = { tasks: 0, notion: 1, ai: 2, webhook: 3, local: 4, todoist: 5, nextcloud: 6, nextcloud_tasks: 7, discord: 8, joplin: 9, timeline: 10 };
 
 // Destinations whose delivery can be safely retried or resumed later. 'ai' (a
 // live conversation) and 'local' (saved on-watch) are intentionally excluded
 // from the retry queue.
-var QUEUEABLE_DESTS = { tasks: 1, notion: 1, webhook: 1, todoist: 1, nextcloud: 1, nextcloud_tasks: 1, discord: 1, joplin: 1 };
+var QUEUEABLE_DESTS = { tasks: 1, notion: 1, webhook: 1, todoist: 1, nextcloud: 1, nextcloud_tasks: 1, discord: 1, joplin: 1, timeline: 1 };
 
 // Dispatch a note to a single cloud destination. Shared by the live router and
 // the retry-queue flush so both take exactly the same delivery path.
@@ -1696,6 +1852,7 @@ function sendToDest(dest, text, cfg, cb, retryState) {
         case 'nextcloud':       sendToNextcloud     (text, cfg, cb); break;
         case 'nextcloud_tasks': sendToNextcloudTasks(text, cfg, cb); break;
         case 'joplin':          sendToJoplin        (text, cfg, cb); break;
+        case 'timeline':        sendToTimeline      (text, cfg, cb, retryState); break;
         default:                cb(false, 'Unknown destination');
     }
 }
@@ -1717,6 +1874,7 @@ function pickDest(text, enabled, cfg, isFollowup) {
         if      (enabled.indexOf('tasks')   >= 0) dest = 'tasks';
         else if (enabled.indexOf('todoist') >= 0) dest = 'todoist';
         else if (enabled.indexOf('nextcloud_tasks') >= 0) dest = 'nextcloud_tasks';
+        else if (enabled.indexOf('timeline') >= 0 && timelinePinTime(text)) dest = 'timeline';
         else dest = 'local';
     }
     return dest;
@@ -1748,7 +1906,7 @@ function routeAndSend(text, isFollowup) {
     // Original text is still used for routing, due-date extraction, and AI context.
     var sendText = cleanNoteText(text);
 
-    var DEST_LABEL = { tasks: 'Tasks', notion: 'Notion', ai: 'AI', webhook: 'Webhook', local: 'Local', todoist: 'Todoist', nextcloud: 'Nextcloud Notes', nextcloud_tasks: 'Nextcloud Tasks', discord: 'Discord', joplin: 'Joplin' };
+    var DEST_LABEL = { tasks: 'Tasks', notion: 'Notion', ai: 'AI', webhook: 'Webhook', local: 'Local', todoist: 'Todoist', nextcloud: 'Nextcloud Notes', nextcloud_tasks: 'Nextcloud Tasks', discord: 'Discord', joplin: 'Joplin', timeline: 'Timeline' };
 
     function onResult(ok, data, retryState) {
         if (!ok) {
@@ -1878,6 +2036,7 @@ function computeDestMask(cfg) {
     if (enabled.indexOf('nextcloud_tasks') >= 0) mask |= 128;
     if (enabled.indexOf('discord')   >= 0) mask |= 256;
     if (enabled.indexOf('joplin')    >= 0) mask |= 512;
+    if (enabled.indexOf('timeline')  >= 0) mask |= 1024;
     return mask;
 }
 
@@ -1949,8 +2108,9 @@ Pebble.addEventListener('appmessage', function(e) {
             var enabled2 = getEnabledDests(cfg2);
             var dest2 = pickDest(p.NOTE_TEXT, enabled2, cfg2, false);
             var msg2 = { ROUTING_DONE: DEST_INDEX[dest2] !== undefined ? DEST_INDEX[dest2] : 4 };
-            // Surface an extracted due date/time for task destinations.
-            if (dest2 === 'tasks' || dest2 === 'todoist' || dest2 === 'nextcloud_tasks') {
+            // Surface an extracted due date/time for task and reminder destinations.
+            if (dest2 === 'tasks' || dest2 === 'todoist' || dest2 === 'nextcloud_tasks' ||
+                dest2 === 'timeline') {
                 var due = formatDueLabel(p.NOTE_TEXT);
                 if (due) msg2.DUE_LABEL = due;
             }
@@ -2099,6 +2259,7 @@ function openSettings() {
     '<option value="webhook"   ' + sel(cfg.default_dest,'webhook')   + '>Webhook</option>' +
     '<option value="discord"   ' + sel(cfg.default_dest,'discord')   + '>Discord</option>' +
     '<option value="joplin"    ' + sel(cfg.default_dest,'joplin')    + '>Joplin</option>' +
+    '<option value="timeline"  ' + sel(cfg.default_dest,'timeline')  + '>Pebble Timeline</option>' +
     '</select></label>' +
     '</div>' +
 
@@ -2282,6 +2443,18 @@ function openSettings() {
     ' value=\'' + esc(cfg.joplin_keywords) + '\' placeholder="joplin, save to joplin, ...">' +
     '</div></div>' +
 
+    // ---- Pebble Timeline ----
+    '<div class="section" id="sec_timeline">' +
+    '<label class="toggle-label"><input type="checkbox" id="timeline_enabled" ' + chk(cfg.timeline_enabled) + '>' +
+    ' Pebble Timeline</label>' +
+    '<div class="fields">' +
+    '<p class="note">Pins a reminder to your watch\'s timeline at the date and time spoken in the note ' +
+    '(' + TIMELINE_DEFAULT_HOUR + ':00 when only a day is given). Notes without a date or time can\'t be pinned. ' +
+    'Nothing to connect.</p>' +
+    'Routing keywords (comma-separated, added to defaults):<input type="text" id="timeline_keywords"' +
+    ' value=\'' + esc(cfg.timeline_keywords) + '\' placeholder="timeline, pin it, ...">' +
+    '</div></div>' +
+
     '<div class="save-bar"><button onclick="save()">Save</button></div>' +
 
     '<script>' +
@@ -2371,7 +2544,7 @@ function openSettings() {
     'function updateRoutingUI(){' +
       'var off=document.getElementById("disable_smart_routing").checked;' +
       'var def=document.getElementById("default_dest").value;' +
-      '["tasks","todoist","notion","nextcloud","nextcloud_tasks","ai","webhook","discord","joplin"].forEach(function(d){' +
+      '["tasks","todoist","notion","nextcloud","nextcloud_tasks","ai","webhook","discord","joplin","timeline"].forEach(function(d){' +
         'var el=document.getElementById("sec_"+d);if(!el)return;' +
         'var dim=off&&d!==def;' +
         'el.style.opacity=dim?"0.5":"";' +
@@ -2501,7 +2674,9 @@ function openSettings() {
     'joplin_token:document.getElementById("joplin_token").value.trim(),' +
     'joplin_notebook_id:document.getElementById("joplin_notebook_id").value.trim(),' +
     'joplin_tags:document.getElementById("joplin_tags").value.trim(),' +
-    'joplin_keywords:document.getElementById("joplin_keywords").value.trim()' +
+    'joplin_keywords:document.getElementById("joplin_keywords").value.trim(),' +
+    'timeline_enabled:document.getElementById("timeline_enabled").checked,' +
+    'timeline_keywords:document.getElementById("timeline_keywords").value.trim()' +
     '};' +
     '}' +
     'function save(){' +
