@@ -49,7 +49,9 @@
       "EXTERNAL_ID",
       "COMPLETE_TASK",
       "WEBHOOK_MSG",
-      "QUEUE_RETRY"
+      "QUEUE_RETRY",
+      "QUICK_SKIP_CONFIRM",
+      "QUICK_AUTO_EXIT"
     ],
     "resources": {
       "media": [
