@@ -270,6 +270,60 @@ check('previews the timeline destination on the review screen', preview.ROUTING_
 check('shows the pin time on the review screen', preview.DUE_LABEL, 'Tomorrow 15:00');
 
 // ---------------------------------------------------------------------------
+section('Google Tasks timeline reminders');
+var TASKS_CFG = { tasks_access_token: 'g-token', tasks_timeline_reminder: true };
+
+function sendTask(text, cfg) {
+    var requests = installFakeXhr();
+    var results = [];
+    context.sendToTasks(text, cfg, function(ok, data) {
+        results.push({ ok: ok, data: data });
+    }, { timestamp: 1700000200 });
+    return { requests: requests, results: results };
+}
+
+var timedTask = sendTask('Call the bank tomorrow at 15:00', TASKS_CFG);
+check('creates the Google task first',
+    timedTask.requests[0].url.indexOf('https://tasks.googleapis.com/') === 0, true);
+check('pins nothing before the task exists', timedTask.requests.length, 1);
+timedTask.requests[0].respond(200, '{"id":"task-1"}');
+checkObject('reports the task result unchanged', timedTask.results,
+    [{ ok: true, data: { taskId: 'task-1' } }]);
+var taskPinReq = timedTask.requests[1];
+check('then pins a timeline reminder', taskPinReq && taskPinReq.method, 'PUT');
+var taskPin = JSON.parse(taskPinReq.body);
+check('rings at the time Google Tasks drops', new Date(taskPin.time).getHours(), 15);
+check('titles the reminder like the task', taskPin.layout.title, 'Call the bank');
+check('keeps the time in the task notes too',
+    JSON.parse(timedTask.requests[0].body).notes, 'Due at 15:00');
+
+taskPinReq.respond(500, '');
+check('keeps a failed pin out of the send result — a retry would duplicate the task',
+    timedTask.results.length, 1);
+
+var untimedTask = sendTask('Call the bank tomorrow', TASKS_CFG);
+untimedTask.requests[0].respond(200, '{"id":"task-2"}');
+check('pins nothing when no time was spoken', untimedTask.requests.length, 1);
+
+var optedOut = sendTask('Call the bank tomorrow at 15:00', { tasks_access_token: 'g-token' });
+optedOut.requests[0].respond(200, '{"id":"task-3"}');
+check('pins nothing when the setting is off', optedOut.requests.length, 1);
+
+var failedTask = sendTask('Call the bank tomorrow at 15:00', TASKS_CFG);
+failedTask.requests[0].respond(500, '');
+check('pins nothing when the task was not created', failedTask.requests.length, 1);
+
+var refreshed = sendTask('Call the bank tomorrow at 15:00', {
+    tasks_access_token: 'old', tasks_refresh_token: 'refresh', tasks_timeline_reminder: true
+});
+refreshed.requests[0].respond(401, '');
+refreshed.requests[1].respond(200, '{"access_token":"new"}');
+refreshed.requests[2].respond(200, '{"id":"task-4"}');
+check('still pins once a refreshed token created the task',
+    refreshed.requests[3] && refreshed.requests[3].method, 'PUT');
+check('pins only once after a token refresh', refreshed.requests.length, 4);
+
+// ---------------------------------------------------------------------------
 section('Settings and watch wiring');
 var savedCfg = { timeline_enabled: true, timeline_keywords: 'ping me' };
 listeners.webviewclosed({ response: encodeURIComponent(JSON.stringify(savedCfg)) });
@@ -287,6 +341,10 @@ check('reads both timeline fields back when saving',
     settingsHtml.indexOf('timeline_keywords:document.getElementById("timeline_keywords")') >= 0, true);
 check('offers the timeline as a default destination',
     settingsHtml.indexOf('<option value="timeline"') >= 0, true);
+check('offers the Google Tasks timeline reminder toggle',
+    settingsHtml.indexOf('id="tasks_timeline_reminder"') >= 0, true);
+check('reads the Google Tasks reminder toggle back when saving',
+    settingsHtml.indexOf('tasks_timeline_reminder:document.getElementById("tasks_timeline_reminder").checked') >= 0, true);
 check('dims the timeline with the other services when smart routing is off',
     settingsHtml.indexOf('"joplin","timeline"') >= 0, true);
 

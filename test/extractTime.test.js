@@ -151,6 +151,11 @@ function extractTime(text, nowHour) {
     return null;
 }
 
+function toDueDateIso(d) {
+    function pad(n) { return n < 10 ? '0' + n : '' + n; }
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + 'T00:00:00.000Z';
+}
+
 function extractDueDate(text) {
     var t = text.toLowerCase();
     var now = new Date(), d = null;
@@ -188,7 +193,7 @@ function extractDueDate(text) {
         }
     }
     if (!d && extractTime(text)) d = new Date(now);
-    return d ? d.toISOString().split('T')[0] + 'T00:00:00.000Z' : null;
+    return d ? toDueDateIso(d) : null;
 }
 
 function stripDateTimeFromText(text) {
@@ -561,6 +566,16 @@ checkNotNull('demain',        extractDueDate('appeler le client demain'));
 section('extractDueDate — Spanish dates');
 checkNotNull('sábado',        extractDueDate('comprar leche el sábado'));
 checkNotNull('mañana (tomorrow)', extractDueDate('llamar mañana'));
+
+section('extractDueDate — local calendar day, not the UTC one');
+// East of UTC, just after local midnight the UTC date is still yesterday.
+var savedTZ = process.env.TZ;
+process.env.TZ = 'Europe/Paris';
+checkStr('00:30 in Paris stays on its own day',
+         toDueDateIso(new Date(2026, 8, 17, 0, 30)), '2026-09-17T00:00:00.000Z');
+checkStr('23:30 in Paris stays on its own day',
+         toDueDateIso(new Date(2026, 8, 17, 23, 30)), '2026-09-17T00:00:00.000Z');
+if (savedTZ === undefined) delete process.env.TZ; else process.env.TZ = savedTZ;
 
 section('extractDueDate — plain non-date text → null');
 check('no date/time DE',  extractDueDate('Rechnung prüfen'),              null);
