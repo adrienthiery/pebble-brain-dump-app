@@ -544,6 +544,14 @@ function extractTime(text, nowHour) {
     return null;
 }
 
+// The date-only shape the task APIs expect, built from the LOCAL calendar day:
+// toISOString() would move a note dictated shortly after local midnight (east
+// of UTC) back to the previous day.
+function toDueDateIso(d) {
+    function pad(n) { return n < 10 ? '0' + n : '' + n; }
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + 'T00:00:00.000Z';
+}
+
 function extractDueDate(text) {
     var t = text.toLowerCase();
     var now = new Date(), d = null;
@@ -586,7 +594,7 @@ function extractDueDate(text) {
     }
     // If only a time is mentioned (no date), default to today
     if (!d && extractTime(text)) d = new Date(now);
-    return d ? d.toISOString().split('T')[0] + 'T00:00:00.000Z' : null;
+    return d ? toDueDateIso(d) : null;
 }
 
 // cb(newToken, invalidGrant)
@@ -614,7 +622,17 @@ function refreshGoogleToken(cfg, cb) {
     );
 }
 
-function sendToTasks(text, cfg, cb) {
+// Google Tasks keeps only the date of a due time — its API discards the rest —
+// so a timed task can also ring from the watch as a timeline reminder.
+// Fire-and-forget: the task already exists, so a pin failure must not reach the
+// send callback, or the retry queue would create the task a second time.
+function pinTaskReminder(text, cfg, retryState) {
+    sendToTimeline(text, cfg, function(ok, err) {
+        console.log(ok ? 'Timeline reminder pinned for task' : 'Timeline reminder failed: ' + err);
+    }, retryState);
+}
+
+function sendToTasks(text, cfg, cb, retryState) {
     var token  = cfg.tasks_access_token;
     var listId = cfg.tasks_list_id || '@default';
     if (!token) { cb(false, 'Google not authenticated'); return; }
@@ -642,6 +660,7 @@ function sendToTasks(text, cfg, cb) {
                     if (created && created.id) taskId = created.id;
                 } catch (e) {}
                 cb(true, taskId ? { taskId: taskId } : 'tasks');
+                if (time && cfg.tasks_timeline_reminder) pinTaskReminder(text, cfg, retryState);
             } else if (this.status === 401) {
                 // Token expired — try refresh
                 refreshGoogleToken(cfg, function(newToken, invalidGrant) {
@@ -1844,7 +1863,7 @@ var QUEUEABLE_DESTS = { tasks: 1, notion: 1, webhook: 1, todoist: 1, nextcloud: 
 // the retry-queue flush so both take exactly the same delivery path.
 function sendToDest(dest, text, cfg, cb, retryState) {
     switch (dest) {
-        case 'tasks':           sendToTasks         (text, cfg, cb); break;
+        case 'tasks':           sendToTasks         (text, cfg, cb, retryState); break;
         case 'notion':          sendToNotion        (text, cfg, cb); break;
         case 'webhook':         sendToWebhook       (text, cfg, cb); break;
         case 'discord':         sendToDiscord       (text, cfg, cb, retryState); break;
@@ -2298,6 +2317,9 @@ function openSettings() {
     '<div id="tasks_fetch_error" class="fetch-error"></div>' +
     '<br>Routing keywords (comma-separated, added to defaults):<input type="text" id="tasks_keywords"' +
     ' value=\'' + esc(cfg.tasks_keywords) + '\' placeholder="buy milk, dentist, ...">' +
+    '<label><input type="checkbox" id="tasks_timeline_reminder" ' + chk(cfg.tasks_timeline_reminder) + '>' +
+    '<span>Also remind me on the Pebble timeline when a time is given</span></label>' +
+    '<p class="note">Google Tasks only stores the due date &mdash; its API drops the time &mdash; so otherwise the time only appears in the task notes.</p>' +
     '</div></div>' +
 
     // ---- Todoist ----
@@ -2630,6 +2652,7 @@ function openSettings() {
     'tasks_refresh_token:document.getElementById("tasks_refresh_token").value,' +
     'tasks_list_id:document.getElementById("tasks_list_id").value.trim(),' +
     'tasks_keywords:document.getElementById("tasks_keywords").value.trim(),' +
+    'tasks_timeline_reminder:document.getElementById("tasks_timeline_reminder").checked,' +
     'todoist_enabled:document.getElementById("todoist_enabled").checked,' +
     'todoist_token:document.getElementById("todoist_token").value.trim(),' +
     'todoist_project_id:document.getElementById("todoist_project_id").value,' +
