@@ -18,6 +18,12 @@
 
 // Persistent storage keys
 //
+// Key map — check here before claiming a new key:
+//   0      history format version      1      history count
+//   4      reminder count              5, 6   Quick Launch flags
+//   10..17 history meta records        30..45 reminder entries
+//   100+   history full-text chunks (100 + slot * HISTORY_FULL_CHUNKS + chunk)
+//
 // Pebble caps each persist value at 256 bytes, so a history entry can't be one
 // blob (short+full+dest+ts ≈ 653 B — the tail fields silently fail to write).
 // We split it: a small meta record (short+dest+ts, ~53 B) per slot, plus the
@@ -206,8 +212,9 @@ static bool    s_is_followup        = false;
 static bool    s_in_ai_thread        = false;
 static int     s_dest_mask           = DEST_BIT_AI;   // default until phone responds
 static bool    s_quick_launch        = false;         // launched via long-press Quick Launch
+static bool    s_quick_note          = false;         // THIS note was started by that gesture
 static bool    s_cfg_quick_skip_confirm = false;      // route without the review screen
-static bool    s_cfg_quick_auto_exit    = false;      // exit once the note is saved
+static bool    s_cfg_quick_auto_exit    = true;       // exit once the note is saved (default on)
 static int16_t s_resp_scroll_offset  = 0;
 static int16_t s_detail_scroll_offset = 0;
 
@@ -722,9 +729,13 @@ static void appmsg_queue_retry(void) {
 // feedback and pop every window, which ends the app. Returns true if it exited
 // (callers then skip the DUMPED success screen). Failure paths never call this,
 // so errors still surface on-screen.
+//
+// The exit reason is what sends the user back to the watchface: without it
+// PebbleOS returns to the launcher, which is not "out of my way" at all.
 static bool quick_exit_after_save(void) {
-    if (!(s_quick_launch && s_cfg_quick_auto_exit)) return false;
+    if (!(s_quick_note && s_cfg_quick_auto_exit)) return false;
     vibes_short_pulse();
+    exit_reason_set(APP_EXIT_ACTION_PERFORMED_SUCCESSFULLY);
     window_stack_pop_all(true);
     return true;
 }
@@ -909,7 +920,7 @@ static void dictation_callback(DictationSession *session,
         APP_LOG(APP_LOG_LEVEL_INFO, "Dictation: %s", s_note_buf);
         // Quick Launch hands-off capture: route straight away, no review screen.
         // Follow-ups (AI thread) keep the review step — they're already interactive.
-        if (s_quick_launch && s_cfg_quick_skip_confirm && !is_followup) {
+        if (s_quick_note && s_cfg_quick_skip_confirm && !is_followup) {
             route_note(false);
             return;
         }
@@ -1211,13 +1222,21 @@ static void confirm_canvas_update(Layer *layer, GContext *ctx) {
     draw_icon_checkmark(ctx, GPoint(ax, btn_select_y(bounds)), ACTION_ICON_COLOR);
 }
 
+// Start dictation. `quick` marks the note the Quick Launch gesture started
+// itself: only that note skips the review screen and exits once saved, so a
+// second note dictated by hand in the same session behaves normally.
+static void start_dictation(bool quick) {
+    s_quick_note = quick;
+    dictation_session_start(s_dictation_session);
+}
+
 static void confirm_route_cb(void *ctx) {
     route_note(s_confirm_is_followup);
 }
 
 static void confirm_redo_cb(void *ctx) {
     s_is_followup = s_confirm_is_followup;
-    dictation_session_start(s_dictation_session);
+    start_dictation(s_quick_note);   // redoing a quick-launched note keeps its behaviour
 }
 
 static void confirm_select_click(ClickRecognizerRef rec, void *ctx) {
@@ -1589,7 +1608,7 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
 }
 
 static void home_select_click(ClickRecognizerRef rec, void *ctx) {
-    dictation_session_start(s_dictation_session);
+    start_dictation(false);
 }
 
 static void home_up_click(ClickRecognizerRef rec, void *ctx) {
@@ -1768,7 +1787,7 @@ static void resp_select_click(ClickRecognizerRef rec, void *ctx) {
         return;
     }
     s_is_followup = true;
-    dictation_session_start(s_dictation_session);
+    start_dictation(false);
 }
 
 static void resp_back_click(ClickRecognizerRef rec, void *ctx) {
@@ -2186,8 +2205,9 @@ static void hist_up_click(ClickRecognizerRef rec, void *ctx) {
     layer_mark_dirty(s_hist_list_layer);
 }
 
+// ctx is non-NULL only for the timer the Quick Launch path registers at boot.
 static void hist_start_dictation_cb(void *ctx) {
-    dictation_session_start(s_dictation_session);
+    start_dictation(ctx != NULL);
 }
 
 // SELECT is count-aware so it stays correct even when the list empties out via
@@ -2513,17 +2533,19 @@ static void init(void) {
 
     // Quick Launch behavior flags — last values pushed from the phone settings.
     s_quick_launch = (launch_reason() == APP_LAUNCH_QUICK_LAUNCH);
-    s_cfg_quick_skip_confirm = persist_exists(PERSIST_QUICK_SKIP_CONFIRM)
-                               && persist_read_bool(PERSIST_QUICK_SKIP_CONFIRM);
-    s_cfg_quick_auto_exit    = persist_exists(PERSIST_QUICK_AUTO_EXIT)
-                               && persist_read_bool(PERSIST_QUICK_AUTO_EXIT);
+    // persist_read_bool() already reports false for a key never written, so the
+    // opt-in flag needs no persist_exists(). Auto-exit defaults to ON, so there
+    // the exists check is what separates "never configured" from "turned off".
+    s_cfg_quick_skip_confirm = persist_read_bool(PERSIST_QUICK_SKIP_CONFIRM);
+    s_cfg_quick_auto_exit    = !persist_exists(PERSIST_QUICK_AUTO_EXIT)
+                               || persist_read_bool(PERSIST_QUICK_AUTO_EXIT);
 
     // Push home window
     home_window_push();
 
     // If launched via quick launch (long-press from watch face), auto-start dictation
     if (s_quick_launch) {
-        app_timer_register(400, hist_start_dictation_cb, NULL);
+        app_timer_register(400, hist_start_dictation_cb, (void *)1);
     }
 }
 

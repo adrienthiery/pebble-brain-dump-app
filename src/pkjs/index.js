@@ -2040,6 +2040,19 @@ function computeDestMask(cfg) {
     return mask;
 }
 
+// Everything the watch mirrors from the settings page. Sent on 'ready' and
+// again whenever settings are saved, so both paths always agree.
+// Exiting to the watchface after a quick-launched note is the default: that
+// launch is a "capture and get out of my way" gesture. The watch defaults the
+// same way, for the launch that happens before the phone has answered.
+function watchMirroredSettings(cfg) {
+    return {
+        DEST_MASK: computeDestMask(cfg),
+        QUICK_SKIP_CONFIRM: cfg.quick_skip_confirm ? 1 : 0,
+        QUICK_AUTO_EXIT: cfg.quick_auto_exit !== false ? 1 : 0
+    };
+}
+
 // ============================================================================
 // PEBBLE EVENTS
 // ============================================================================
@@ -2047,11 +2060,7 @@ function computeDestMask(cfg) {
 Pebble.addEventListener('ready', function() {
     console.log('Brain Dump JS ready');
     var cfg     = getConfig();
-    sendToWatch({
-        DEST_MASK: computeDestMask(cfg),
-        QUICK_SKIP_CONFIRM: cfg.quick_skip_confirm ? 1 : 0,
-        QUICK_AUTO_EXIT: cfg.quick_auto_exit ? 1 : 0
-    });
+    sendToWatch(watchMirroredSettings(cfg));
 
     // Retry any sends that failed while the phone was offline / the API was down.
     flushQueue();
@@ -2250,9 +2259,9 @@ function openSettings() {
     '<div class="section">' +
     '<label><input type="checkbox" id="quick_skip_confirm" ' + chk(cfg.quick_skip_confirm) + '>' +
     '<span>Send without review</span></label>' +
-    '<label><input type="checkbox" id="quick_auto_exit" ' + chk(cfg.quick_auto_exit) + '>' +
+    '<label><input type="checkbox" id="quick_auto_exit" ' + chk(cfg.quick_auto_exit !== false) + '>' +
     '<span>Exit app after saving</span></label>' +
-    '<p class="note">These only apply when the app is opened via a Quick Launch long-press. Follow-up prompts and errors still stay on screen.</p>' +
+    '<p class="note">These only apply to the note a Quick Launch long-press starts itself &mdash; dictate another one from the app and it behaves as usual. Follow-up prompts and errors still stay on screen. While exiting after saving, a two-way webhook\'s reply never appears, since the success screen is skipped.</p>' +
     '</div>' +
 
     '<h3>Routing</h3>' +
@@ -2742,12 +2751,9 @@ Pebble.addEventListener('webviewclosed', function(e) {
         delete cfg._reopen;
         saveConfig(cfg);
         console.log('Config saved, dest mask recalculated');
-        // Re-send the watch-mirrored settings (dest mask + Quick Launch flags)
-        sendToWatch({
-            DEST_MASK: computeDestMask(cfg),
-            QUICK_SKIP_CONFIRM: cfg.quick_skip_confirm ? 1 : 0,
-            QUICK_AUTO_EXIT: cfg.quick_auto_exit ? 1 : 0
-        });
+        // Re-send the watch-mirrored settings so newly enabled destinations and
+        // Quick Launch flags are available immediately.
+        sendToWatch(watchMirroredSettings(cfg));
         // "Save & verify target" (Notion refresh): reopen settings so the pkjs
         // probe re-runs against the just-saved target.
         if (reopen) openSettings();
