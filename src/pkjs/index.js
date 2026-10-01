@@ -338,6 +338,62 @@ function classifyIntent(text, enabled, cfg) {
 }
 
 // ============================================================================
+// EXTRA REQUEST HEADERS
+// ============================================================================
+// Self-hosted and proxied endpoints often need one header the destination
+// itself knows nothing about: a Cloudflare Access service token, a gateway's
+// own API key, an attribution header, or a session id the server keys its
+// conversation history on. Rather than growing a field per case, every
+// destination that posts to a URL the user supplies reads
+// cfg.<dest>_headers — "Name: value" lines — through the two helpers below,
+// the same way getCustomKeywords() reads cfg.<dest>_keywords. Wiring a new
+// destination in is one applyExtraHeaders() call plus one settings field.
+
+// A burst of headers is never intentional; the cap keeps a stray paste from
+// turning every send into an oversized request. Stated on the settings page.
+var MAX_EXTRA_HEADERS = 10;
+
+// Header-name characters RFC 7230 allows for a token. Anything else (a space,
+// a quote, a newline a paste smuggled in) means the line isn't a header, so it
+// is dropped rather than guessed at.
+var HEADER_NAME_RE = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
+
+// Parse "Name: value" lines into [{ name, value }]. Blank lines are skipped
+// and a leading # comments a header out, so one can be disabled without losing
+// it. Only the first colon splits, leaving "X-Base: https://host:8080" intact.
+function parseExtraHeaders(raw) {
+    var out = [];
+    var dropped = 0;
+    (raw || '').split('\n').forEach(function(line) {
+        line = line.replace(/[\r\n]/g, '').trim();
+        if (!line || line.charAt(0) === '#') return;
+        var i = line.indexOf(':');
+        if (i <= 0) return;
+        var name  = line.substring(0, i).trim();
+        var value = line.substring(i + 1).trim();
+        if (!HEADER_NAME_RE.test(name) || !value) return;
+        if (out.length >= MAX_EXTRA_HEADERS) { dropped++; return; }
+        out.push({ name: name, value: value });
+    });
+    if (dropped) {
+        console.log('Extra headers: only the first ' + MAX_EXTRA_HEADERS +
+                    ' are sent, ignoring ' + dropped + ' more');
+    }
+    return out;
+}
+
+// Set the configured headers on a request. Applied after the destination's own
+// headers, so a gateway can deliberately override one (Content-Type, say).
+// Values are secrets as often as not, so nothing here logs a value — a name
+// XHR refuses to set (Host, Content-Length, …) throws, and is reported by name.
+function applyExtraHeaders(xhr, cfg, dest) {
+    parseExtraHeaders(cfg[dest + '_headers']).forEach(function(h) {
+        try { xhr.setRequestHeader(h.name, h.value); }
+        catch (e) { console.log('Extra header rejected by the request: ' + h.name); }
+    });
+}
+
+// ============================================================================
 // GOOGLE TASKS
 // ============================================================================
 
@@ -930,6 +986,7 @@ function sendToAI(text, isFollowup, cfg, cb) {
     xhr.open('POST', endpoint);
     xhr.setRequestHeader('Content-Type', 'application/json');
     if (apiKey) xhr.setRequestHeader('Authorization', 'Bearer ' + apiKey);
+    applyExtraHeaders(xhr, cfg, 'ai');
     xhr.onload = function() {
         try {
             var r = JSON.parse(this.responseText);
@@ -1043,6 +1100,7 @@ function sendToWebhook(text, cfg, cb) {
         xhr.setRequestHeader('Content-Type', buildWebhookContentType(cfg.webhook_content_type));
     }
     if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+    applyExtraHeaders(xhr, cfg, 'webhook');
     xhr.onload = function() {
         var isOk = this.status >= 200 && this.status < 300;
         // Surface the webhook's response body to the watch when present, so the
@@ -1273,6 +1331,7 @@ function sendToNextcloud(text, cfg, cb) {
     xhr.setRequestHeader('Authorization', 'Basic ' + btoa64(user + ':' + pass));
     xhr.setRequestHeader('Content-Type', 'application/json');
     xhr.setRequestHeader('OCS-APIREQUEST', 'true');
+    applyExtraHeaders(xhr, cfg, 'nextcloud');
     xhr.onload = function() {
         if (this.status >= 200 && this.status < 300) {
             cb(true, 'nextcloud');
@@ -1360,6 +1419,7 @@ function sendToNextcloudTasks(text, cfg, cb) {
     xhr.open('PUT', url);
     xhr.setRequestHeader('Authorization', 'Basic ' + btoa64(user + ':' + pass));
     xhr.setRequestHeader('Content-Type', 'text/calendar; charset=utf-8');
+    applyExtraHeaders(xhr, cfg, 'nextcloud_tasks');
     xhr.onload = function() {
         if (this.status >= 200 && this.status < 300) {
             cb(true, 'nextcloud_tasks');
@@ -1408,6 +1468,23 @@ function joplinUrl(base, path, token) {
            'token=' + encodeURIComponent(token);
 }
 
+function joplinBase(cfg) {
+    return (cfg.joplin_url || '').replace(/\/$/, '');
+}
+
+// Every Joplin request goes through here — the note, its tags, and the
+// notebook probe the settings page runs. One place decides how the token
+// travels and that the configured extra headers come along, so a Joplin behind
+// Cloudflare Access (or any other gateway) is reachable on all of them, not
+// just the note. Extra headers are set last so an override still wins.
+function joplinRequest(cfg, method, path) {
+    var xhr = new XMLHttpRequest();
+    xhr.open(method, joplinUrl(joplinBase(cfg), path, cfg.joplin_token));
+    if (method !== 'GET') xhr.setRequestHeader('Content-Type', 'application/json');
+    applyExtraHeaders(xhr, cfg, 'joplin');
+    return xhr;
+}
+
 // Settings hold a comma-separated list. Capped so a long list can't turn one
 // note into a burst of requests; the cap is stated in the settings page and
 // logged when it bites, so dropped tags are never silent.
@@ -1429,7 +1506,8 @@ function joplinTagList(cfg) {
 // forget: the note already exists, so a tagging failure must not reach the
 // send callback — the retry queue would replay the whole note and duplicate it
 // in Joplin (the failure mode fixed in ce8de53).
-function tagJoplinNote(base, token, noteId, tags) {
+function tagJoplinNote(cfg, noteId, tags) {
+    var base = joplinBase(cfg);
     var ids = getJoplinTagCache(base);
     var i = 0;
 
@@ -1438,8 +1516,8 @@ function tagJoplinNote(base, token, noteId, tags) {
         var title = tags[i++];
         if (ids[title]) { attach(title, ids[title]); return; }
         // Not cached: find the tag, creating it if Joplin doesn't have it yet.
-        var q = new XMLHttpRequest();
-        q.open('GET', joplinUrl(base, '/search?query=' + encodeURIComponent(title) + '&type=tag', token));
+        var q = joplinRequest(cfg, 'GET',
+            '/search?query=' + encodeURIComponent(title) + '&type=tag');
         q.onload = function() {
             var found = null;
             try {
@@ -1454,9 +1532,7 @@ function tagJoplinNote(base, token, noteId, tags) {
     }
 
     function createTag(title) {
-        var c = new XMLHttpRequest();
-        c.open('POST', joplinUrl(base, '/tags', token));
-        c.setRequestHeader('Content-Type', 'application/json');
+        var c = joplinRequest(cfg, 'POST', '/tags');
         c.onload = function() {
             var id = null;
             try { id = JSON.parse(this.responseText).id; } catch (e) {}
@@ -1467,9 +1543,8 @@ function tagJoplinNote(base, token, noteId, tags) {
     }
 
     function attach(title, tagId) {
-        var a = new XMLHttpRequest();
-        a.open('POST', joplinUrl(base, '/tags/' + encodeURIComponent(tagId) + '/notes', token));
-        a.setRequestHeader('Content-Type', 'application/json');
+        var a = joplinRequest(cfg, 'POST',
+            '/tags/' + encodeURIComponent(tagId) + '/notes');
         a.onload = function() {
             // A stale cached id 404s — drop it so the next send re-resolves it.
             if (this.status === 404) delete ids[title];
@@ -1490,8 +1565,7 @@ function tagJoplinNote(base, token, noteId, tags) {
 // truncated list — a missing notebook the user can't explain is worse than a
 // slightly slower settings screen. MAX_PAGES only guards against a server that
 // never stops saying has_more; whatever was collected so far is still used.
-function listJoplinFolders(url, token, done) {
-    var base = (url || '').replace(/\/$/, '');
+function listJoplinFolders(cfg, done) {
     var MAX_PAGES = 10;
     var folders = [];
     var finished = false;
@@ -1500,8 +1574,7 @@ function listJoplinFolders(url, token, done) {
     function stop() { finish(folders.length ? folders : null); }
 
     function fetchPage(page) {
-        var xhr = new XMLHttpRequest();
-        xhr.open('GET', joplinUrl(base, '/folders?page=' + page, token));
+        var xhr = joplinRequest(cfg, 'GET', '/folders?page=' + page);
         xhr.timeout = 6000;
         xhr.onload = function() {
             if (this.status < 200 || this.status >= 300) { stop(); return; }
@@ -1520,9 +1593,7 @@ function listJoplinFolders(url, token, done) {
 }
 
 function sendToJoplin(text, cfg, cb) {
-    var base  = (cfg.joplin_url || '').replace(/\/$/, '');
-    var token = cfg.joplin_token;
-    if (!base || !token) { cb(false, 'Joplin not configured'); return; }
+    if (!joplinBase(cfg) || !cfg.joplin_token) { cb(false, 'Joplin not configured'); return; }
 
     var body = {
         title:      text.substring(0, 80),
@@ -1531,9 +1602,7 @@ function sendToJoplin(text, cfg, cb) {
     };
     if (cfg.joplin_notebook_id) body.parent_id = cfg.joplin_notebook_id;
 
-    var xhr = new XMLHttpRequest();
-    xhr.open('POST', joplinUrl(base, '/notes', token));
-    xhr.setRequestHeader('Content-Type', 'application/json');
+    var xhr = joplinRequest(cfg, 'POST', '/notes');
     xhr.onload = function() {
         if (this.status >= 200 && this.status < 300) {
             var noteId = null;
@@ -1541,7 +1610,7 @@ function sendToJoplin(text, cfg, cb) {
             // Report success first; tags are a best-effort follow-up.
             cb(true, 'joplin');
             var tags = joplinTagList(cfg);
-            if (noteId && tags.length) tagJoplinNote(base, token, noteId, tags);
+            if (noteId && tags.length) tagJoplinNote(cfg, noteId, tags);
         } else if (this.status === 401 || this.status === 403) {
             cb(false, 'Invalid token');
         } else if (this.status === 404) {
@@ -2209,6 +2278,20 @@ function openSettings() {
     function chk(v) { return v ? 'checked' : ''; }
     function sel(a, b) { return a === b ? 'selected' : ''; }
 
+    // One field for every destination that talks to a URL the user supplies,
+    // so each service's section offers the same thing in the same words. The
+    // id is cfg's key, which is what applyExtraHeaders() reads on the send side.
+    function extraHeadersField(dest, placeholder) {
+        var id = dest + '_headers';
+        return 'Extra request headers (optional, one "Name: value" per line, max ' +
+               MAX_EXTRA_HEADERS + '):' +
+               '<textarea id="' + id + '" rows="2" class="secret" placeholder="' + placeholder + '">' +
+               escText(cfg[id]) + '</textarea>' +
+               '<label class="reveal"><input type="checkbox" ' +
+               'onchange="toggleSecret(\'' + id + '\', this.checked)">' +
+               '<span>Show values</span></label>';
+    }
+
     // Notebook picker: a <select> when the pkjs probe could list the notebooks,
     // otherwise a free-text id field. Both expose id "joplin_notebook_id" so
     // buildCfg() reads whichever is present.
@@ -2253,6 +2336,9 @@ function openSettings() {
     'padding:8px;background:#222;color:#eee;border:1px solid #444;border-radius:4px;' +
     'font-size:13px;margin:4px 0}' +
     'textarea{font-family:monospace;min-height:64px;resize:vertical}' +
+    // Header values are as sensitive as the API keys above them.
+    'textarea.secret{-webkit-text-security:disc}' +
+    '.reveal{font-size:11px;color:#666;margin:2px 0 8px}' +
     '.section{background:#1a1a1a;border:1px solid #333;border-radius:6px;' +
     'padding:12px;margin:12px 0}' +
     '.toggle-label{font-weight:bold;font-size:15px}' +
@@ -2389,6 +2475,7 @@ function openSettings() {
     'App password:<input type="password" id="nextcloud_pass" value=\'' + esc(cfg.nextcloud_pass) + '\'>' +
     '<p class="note">Generate an App Password in Nextcloud: Settings → Security → App passwords</p>' +
     'Category (optional):<input type="text" id="nextcloud_category" value=\'' + esc(cfg.nextcloud_category) + '\' placeholder="Brain Dump">' +
+    extraHeadersField('nextcloud', 'CF-Access-Client-Id: ...') +
     'Routing keywords (comma-separated, added to defaults):<input type="text" id="nextcloud_keywords"' +
     ' value=\'' + esc(cfg.nextcloud_keywords) + '\' placeholder="nextcloud, cloud note, ...">' +
     '</div></div>' +
@@ -2403,6 +2490,7 @@ function openSettings() {
     'App password:<input type="password" id="nextcloud_tasks_pass" value=\'' + esc(cfg.nextcloud_tasks_pass) + '\'>' +
     '<p class="note">Generate an App Password in Nextcloud: Settings → Security → App passwords. May be the same instance as Nextcloud Notes.</p>' +
     'Task list (CalDAV name):<input type="text" id="nextcloud_tasks_list" value=\'' + esc(cfg.nextcloud_tasks_list) + '\' placeholder="personal">' +
+    extraHeadersField('nextcloud_tasks', 'CF-Access-Client-Id: ...') +
     '<p class="note">The list\'s internal name, not its display title. Default list is usually "personal". Find it in the Tasks app URL: …/apps/tasks/#/calendars/<b>NAME</b></p>' +
     'Routing keywords (comma-separated, added to defaults):<input type="text" id="nextcloud_tasks_keywords"' +
     ' value=\'' + esc(cfg.nextcloud_tasks_keywords) + '\' placeholder="nextcloud task, todo cloud, ...">' +
@@ -2425,6 +2513,7 @@ function openSettings() {
     'Base URL:<input type="text" id="ai_url" value=\'' + esc(cfg.ai_url) + '\'>' +
     'Model:<input type="text" id="ai_model" value=\'' + esc(cfg.ai_model) + '\'>' +
     'API key:<input type="password" id="ai_key" value=\'' + esc(cfg.ai_key) + '\'>' +
+    extraHeadersField('ai', 'X-Hermes-Session-Id: brain-dump') +
     '<p class="note" id="nvidia_note" style="display:' + (cfg.ai_preset === 'nvidia' ? 'block' : 'none') + '">Get a free NVIDIA API key at ' +
     '<a href="https://build.nvidia.com" target="_blank">build.nvidia.com</a> ' +
     '(no credit card required)</p>' +
@@ -2456,6 +2545,7 @@ function openSettings() {
     '<p class="note">Placeholders: <code>{text}</code> (escaped for a JSON string), <code>{text_url}</code> (escaped for a form-urlencoded body), <code>{timestamp}</code>, <code>{json}</code> (the whole default payload). Left empty, the default <code>{"text":...,"timestamp":...}</code> is sent.</p>' +
     '</div>' +
     'Bearer token (optional):<input type="password" id="webhook_token" value=\'' + esc(cfg.webhook_token) + '\'>' +
+    extraHeadersField('webhook', 'X-Api-Key: ...') +
     'Trigger keywords (comma-separated):<input type="text" id="webhook_keywords"' +
     ' value=\'' + esc(cfg.webhook_keywords) + '\' placeholder="send, post, hook">' +
     '</div></div>' +
@@ -2479,6 +2569,7 @@ function openSettings() {
     'Web Clipper URL:<input type="text" id="joplin_url" value=\'' + esc(cfg.joplin_url) + '\' placeholder="https://joplin.example.com">' +
     '<p class="note">Needs a Joplin <b>client</b> with the Web Clipper service on (desktop, or the CLI running headless) &mdash; Joplin Server alone has no note API. Use HTTPS: the token travels in the query string.</p>' +
     'API token:<input type="password" id="joplin_token" value=\'' + esc(cfg.joplin_token) + '\'>' +
+    extraHeadersField('joplin', 'CF-Access-Client-Id: ...') +
     '<p class="note">Joplin &rarr; Options &rarr; Web Clipper, or <code>joplin config api.token</code> on the CLI.</p>' +
     'Notebook:' + joplinNotebookField +
     'Tags (comma-separated, optional, max ' + JOPLIN_MAX_TAGS + '):<input type="text" id="joplin_tags"' +
@@ -2664,6 +2755,11 @@ function openSettings() {
       'document.getElementById("tasks_enabled").checked=false;' +
       'save();' +
     '}' +
+    // Header values stay masked like the API keys until asked for.
+    'function toggleSecret(id,show){' +
+      'var el=document.getElementById(id);' +
+      'if(el)el.style.webkitTextSecurity=show?"none":"disc";' +
+    '}' +
     'function buildCfg(){' +
     'return {' +
     'metric_units:document.getElementById("metric_units").checked,' +
@@ -2692,18 +2788,21 @@ function openSettings() {
     'nextcloud_user:document.getElementById("nextcloud_user").value.trim(),' +
     'nextcloud_pass:document.getElementById("nextcloud_pass").value.trim(),' +
     'nextcloud_category:document.getElementById("nextcloud_category").value.trim(),' +
+    'nextcloud_headers:document.getElementById("nextcloud_headers").value.trim(),' +
     'nextcloud_keywords:document.getElementById("nextcloud_keywords").value.trim(),' +
     'nextcloud_tasks_enabled:document.getElementById("nextcloud_tasks_enabled").checked,' +
     'nextcloud_tasks_url:document.getElementById("nextcloud_tasks_url").value.trim(),' +
     'nextcloud_tasks_user:document.getElementById("nextcloud_tasks_user").value.trim(),' +
     'nextcloud_tasks_pass:document.getElementById("nextcloud_tasks_pass").value.trim(),' +
     'nextcloud_tasks_list:document.getElementById("nextcloud_tasks_list").value.trim(),' +
+    'nextcloud_tasks_headers:document.getElementById("nextcloud_tasks_headers").value.trim(),' +
     'nextcloud_tasks_keywords:document.getElementById("nextcloud_tasks_keywords").value.trim(),' +
     'ai_enabled:document.getElementById("ai_enabled").checked,' +
     'ai_preset:document.getElementById("ai_preset").value,' +
     'ai_url:document.getElementById("ai_url").value.trim(),' +
     'ai_model:document.getElementById("ai_model").value.trim(),' +
     'ai_key:document.getElementById("ai_key").value.trim(),' +
+    'ai_headers:document.getElementById("ai_headers").value.trim(),' +
     'ai_system:document.getElementById("ai_system").value.trim(),' +
     'ai_keywords:document.getElementById("ai_keywords").value.trim(),' +
     'webhook_enabled:document.getElementById("webhook_enabled").checked,' +
@@ -2712,6 +2811,7 @@ function openSettings() {
     'webhook_content_type:document.getElementById("webhook_content_type").value.trim(),' +
     'webhook_body:document.getElementById("webhook_body").value.trim(),' +
     'webhook_token:document.getElementById("webhook_token").value.trim(),' +
+    'webhook_headers:document.getElementById("webhook_headers").value.trim(),' +
     'webhook_keywords:document.getElementById("webhook_keywords").value.trim(),' +
     'discord_enabled:document.getElementById("discord_enabled").checked,' +
     'discord_url:document.getElementById("discord_url").value.trim(),' +
@@ -2719,6 +2819,7 @@ function openSettings() {
     'joplin_enabled:document.getElementById("joplin_enabled").checked,' +
     'joplin_url:document.getElementById("joplin_url").value.trim(),' +
     'joplin_token:document.getElementById("joplin_token").value.trim(),' +
+    'joplin_headers:document.getElementById("joplin_headers").value.trim(),' +
     'joplin_notebook_id:document.getElementById("joplin_notebook_id").value.trim(),' +
     'joplin_tags:document.getElementById("joplin_tags").value.trim(),' +
     'joplin_keywords:document.getElementById("joplin_keywords").value.trim(),' +
@@ -2751,7 +2852,7 @@ function openSettings() {
             render(notionStatus, null);
             return;
         }
-        listJoplinFolders(cfg.joplin_url, cfg.joplin_token, function(folders) {
+        listJoplinFolders(cfg, function(folders) {
             render(notionStatus, folders);
         });
     }
