@@ -976,9 +976,11 @@ function sendToAI(text, isFollowup, cfg, cb) {
     var body = {
         model:      model,
         messages:   s_ai_messages,
-        max_tokens: 4096,
-        temperature: 0.7
+        max_tokens: 4096
     };
+    // Current Claude models reject a non-default temperature with HTTP 400,
+    // so leave it at the provider default when talking to Anthropic.
+    if (!/^https?:\/\/api\.anthropic\.com\//i.test(baseUrl + '/')) body.temperature = 0.7;
 
     var endpoint = baseUrl + '/chat/completions';
     console.log('AI request → ' + endpoint + ' (model: ' + model + ')');
@@ -990,18 +992,17 @@ function sendToAI(text, isFollowup, cfg, cb) {
     xhr.onload = function() {
         try {
             var r = JSON.parse(this.responseText);
-            var content = r.choices && r.choices[0] &&
-                          r.choices[0].message && r.choices[0].message.content;
-            if (!content) {
-                // Thinking models (e.g. Qwen3) put chain-of-thought in reasoning_content;
-                // content is only populated after reasoning finishes.
-                content = r.choices[0].message.reasoning_content || '';
-            }
+            var message = r.choices && r.choices[0] && r.choices[0].message;
+            // Thinking models (e.g. Qwen3) put chain-of-thought in reasoning_content;
+            // content is only populated after reasoning finishes. Error responses
+            // have no choices at all, so fall through to the error message below.
+            var content = message && (message.content || message.reasoning_content);
             if (content) {
                 s_ai_messages.push({ role: 'assistant', content: content });
                 cb(true, content.substring(0, 380));
             } else {
-                var errMsg = (r.error && r.error.message) ? r.error.message : 'Empty AI response';
+                var errMsg = (r.error && r.error.message) ? r.error.message :
+                             (this.status >= 400 ? 'HTTP ' + this.status : 'Empty AI response');
                 console.log('AI error body: ' + this.responseText.substring(0, 200));
                 cb(false, errMsg.substring(0, 60));
             }
