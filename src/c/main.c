@@ -1214,41 +1214,23 @@ static GRect confirm_column(GRect b, int y, int h) {
 }
 #endif
 
-// The note's scrolling view, y..y+h. Round narrows it to a column that stays
-// inside the circle along its whole height (the row farthest from the center
-// sets the width), clear of the action bar.
-static GRect confirm_note_frame(GRect b, int y, int h) {
+// Height of the note as laid out in the view `note` (absolute on screen). Round
+// lays it out like the TextLayer does: flowing along the circle, paged by the
+// view's height, so the ScrollLayer's page-sized steps land between lines.
+static int16_t confirm_note_text_h(GRect note) {
+    GRect box = GRect(0, 0, note.size.w, 2000);
 #ifdef PBL_ROUND
-    int r = b.size.w / 2, cy = b.size.h / 2;
-    int dy_top = cy - y, dy_bottom = y + h - cy;
-    int dy = (dy_top > dy_bottom) ? dy_top : dy_bottom;
-    int half = 0;
-    while ((half + 1) * (half + 1) <= r * r - dy * dy) half++;   // isqrt
-    half -= 4;
-    int max_half = action_bar_x(b) - r;
-    if (half > max_half) half = max_half;
-    return GRect(r - half, y, 2 * half, h);
+    GTextAttributes *attrs = graphics_text_attributes_create();
+    graphics_text_attributes_enable_screen_text_flow(attrs, 4);
+    graphics_text_attributes_enable_paging(attrs, note.origin, note);
+    GSize size = graphics_text_layout_get_content_size_with_attributes(s_note_buf,
+        app_font(AF_BODY), box, GTextOverflowModeWordWrap, CONFIRM_TEXT_ALIGN, attrs);
+    graphics_text_attributes_destroy(attrs);
 #else
-    return confirm_column(b, y, h);
+    GSize size = graphics_text_layout_get_content_size(s_note_buf,
+        app_font(AF_BODY), box, GTextOverflowModeWordWrap, CONFIRM_TEXT_ALIGN);
 #endif
-}
-
-static int16_t confirm_max_scroll(void) {
-    GSize cs = scroll_layer_get_content_size(s_confirm_scroll_layer);
-    GRect fr = layer_get_frame(scroll_layer_get_layer(s_confirm_scroll_layer));
-    int16_t max_scroll = cs.h - fr.size.h;
-    return (max_scroll < 0) ? 0 : max_scroll;
-}
-
-// Clamp to the scrollable range and redraw the action bar, whose UP icon
-// depends on whether the note is scrolled.
-static void confirm_scroll_to(int16_t offset, bool animated) {
-    int16_t max_scroll = confirm_max_scroll();
-    if (offset > max_scroll) offset = max_scroll;
-    if (offset < 0) offset = 0;
-    s_confirm_scroll_offset = offset;
-    scroll_layer_set_content_offset(s_confirm_scroll_layer, GPoint(0, -offset), animated);
-    if (s_confirm_canvas_layer) layer_mark_dirty(s_confirm_canvas_layer);
+    return size.h;
 }
 
 static void confirm_relayout_meta(GRect b) {
@@ -1268,19 +1250,14 @@ static void confirm_relayout_meta(GRect b) {
                     confirm_column(b, due_y, CONFIRM_DUE_H));
     layer_set_hidden(text_layer_get_layer(s_confirm_due_layer), !has_due);
 
-    // The note view fills the space between the title and the meta lines; on
-    // round its width depends on that height, so re-wrap and re-measure.
-    GRect note = confirm_note_frame(b, STATUS_H + 4, content_bottom - (STATUS_H + 4));
+    // The note view fills the space between the title and the meta lines. A
+    // taller meta shrinks it, so re-measure and go back to the top. Measured
+    // directly: once drawn, the TextLayer reports only the clipped part.
+    GRect note = confirm_column(b, STATUS_H + 4, content_bottom - (STATUS_H + 4));
     layer_set_frame(scroll_layer_get_layer(s_confirm_scroll_layer), note);
-    layer_set_frame(text_layer_get_layer(s_confirm_content_layer),
-                    GRect(0, 0, note.size.w, 2000));
-    // Measured directly: once drawn, the TextLayer reports only the clipped part.
-    GSize text_size = graphics_text_layout_get_content_size(s_note_buf,
-        app_font(AF_BODY), GRect(0, 0, note.size.w, 2000),
-        GTextOverflowModeWordWrap, CONFIRM_TEXT_ALIGN);
     scroll_layer_set_content_size(s_confirm_scroll_layer,
-        GSize(note.size.w, text_size.h + 4));
-    confirm_scroll_to(s_confirm_scroll_offset, false);   // a taller meta shrinks the view
+        GSize(note.size.w, confirm_note_text_h(note) + 4));
+    scroll_layer_set_content_offset(s_confirm_scroll_layer, GPointZero, false);
 }
 
 static void confirm_canvas_update(Layer *layer, GContext *ctx) {
@@ -1323,22 +1300,34 @@ static void confirm_select_click(ClickRecognizerRef rec, void *ctx) {
     app_timer_register(50, confirm_route_cb, NULL);
 }
 
-// After UP scrolls back to the top, the next UP would redo the dictation (and
-// drop this transcript), so a quick extra press while scrolling up is ignored.
+// After the note scrolls back to the top, the next UP would redo the dictation
+// (and drop this transcript), so a quick extra press while scrolling up is
+// ignored.
 #define CONFIRM_REDO_GUARD_MS 500
 
 static void confirm_redo_guard_cb(void *ctx) {
     s_confirm_redo_guard = NULL;
 }
 
+// Called for every step of a scroll animation. Track the offset for UP and the
+// action bar's redo icon; arm the guard when a scroll lands on the top.
+static void confirm_offset_changed(ScrollLayer *scroll_layer, void *ctx) {
+    int16_t offset = -scroll_layer_get_content_offset(scroll_layer).y;
+    if (offset == s_confirm_scroll_offset) return;
+    if (offset == 0) {
+        if (s_confirm_redo_guard) app_timer_cancel(s_confirm_redo_guard);
+        s_confirm_redo_guard = app_timer_register(CONFIRM_REDO_GUARD_MS,
+                                                  confirm_redo_guard_cb, NULL);
+    }
+    s_confirm_scroll_offset = offset;
+    if (s_confirm_canvas_layer) layer_mark_dirty(s_confirm_canvas_layer);
+}
+
+// Replaces the ScrollLayer's UP: scroll as it would, except at the top where
+// UP redoes the dictation. DOWN stays the ScrollLayer's own.
 static void confirm_up_click(ClickRecognizerRef rec, void *ctx) {
     if (s_confirm_scroll_offset > 0) {
-        confirm_scroll_to(s_confirm_scroll_offset - RESP_SCROLL_STEP, true);
-        if (s_confirm_scroll_offset == 0) {
-            if (s_confirm_redo_guard) app_timer_cancel(s_confirm_redo_guard);
-            s_confirm_redo_guard = app_timer_register(CONFIRM_REDO_GUARD_MS,
-                                                      confirm_redo_guard_cb, NULL);
-        }
+        scroll_layer_scroll_up_click_handler(rec, s_confirm_scroll_layer);
         return;
     }
     if (s_confirm_redo_guard) return;
@@ -1346,14 +1335,10 @@ static void confirm_up_click(ClickRecognizerRef rec, void *ctx) {
     app_timer_register(300, confirm_redo_cb, NULL);
 }
 
-static void confirm_down_click(ClickRecognizerRef rec, void *ctx) {
-    confirm_scroll_to(s_confirm_scroll_offset + RESP_SCROLL_STEP, true);
-}
-
+// Runs after the ScrollLayer has set up UP/DOWN (see confirm_window_load).
 static void confirm_click_config(void *ctx) {
     window_single_click_subscribe(BUTTON_ID_SELECT, confirm_select_click);
     window_single_click_subscribe(BUTTON_ID_UP,     confirm_up_click);
-    window_single_click_subscribe(BUTTON_ID_DOWN,   confirm_down_click);
 }
 
 static void confirm_window_load(Window *window) {
@@ -1384,10 +1369,16 @@ static void confirm_window_load(Window *window) {
 
     // The note scrolls (UP/DOWN) between the title and the pinned destination
     // lines; confirm_relayout_meta() sizes the view once those are placed.
-    GRect note_frame = confirm_note_frame(b, STATUS_H + 4, b.size.h - STATUS_H - 8);
+    GRect note_frame = confirm_column(b, STATUS_H + 4, b.size.h - STATUS_H - 8);
     s_confirm_scroll_offset = 0;
     s_confirm_scroll_layer = scroll_layer_create(note_frame);
     scroll_layer_set_shadow_hidden(s_confirm_scroll_layer, true);
+    // The ScrollLayer drives UP/DOWN; our provider adds SELECT and replaces UP.
+    scroll_layer_set_click_config_onto_window(s_confirm_scroll_layer, window);
+    scroll_layer_set_callbacks(s_confirm_scroll_layer, (ScrollLayerCallbacks) {
+        .click_config_provider          = confirm_click_config,
+        .content_offset_changed_handler = confirm_offset_changed,
+    });
     layer_add_child(root, scroll_layer_get_layer(s_confirm_scroll_layer));
 
     s_confirm_content_layer = text_layer_create(GRect(0, 0, note_frame.size.w, 2000));
@@ -1398,6 +1389,11 @@ static void confirm_window_load(Window *window) {
     text_layer_set_text_alignment(s_confirm_content_layer, CONFIRM_TEXT_ALIGN);
     text_layer_set_text(s_confirm_content_layer, s_note_buf);
     scroll_layer_add_child(s_confirm_scroll_layer, text_layer_get_layer(s_confirm_content_layer));
+#ifdef PBL_ROUND
+    // Wrap each line inside the circle; one UP/DOWN press moves one page.
+    text_layer_enable_screen_text_flow_and_paging(s_confirm_content_layer, 4);
+    scroll_layer_set_paging(s_confirm_scroll_layer, true);
+#endif
 
     // Destination ("→ Google Tasks") + any extracted due date/time below it.
     snprintf(s_confirm_target_buf, sizeof(s_confirm_target_buf), "\xe2\x86\x92 ?");
@@ -1437,7 +1433,6 @@ static void confirm_window_load(Window *window) {
 
     confirm_relayout_meta(b);
 
-    window_set_click_config_provider(window, confirm_click_config);
     s_confirm_open = true;
 }
 
