@@ -978,9 +978,10 @@ function sendToAI(text, isFollowup, cfg, cb) {
         messages:   s_ai_messages,
         max_tokens: 4096
     };
-    // Current Claude models reject a non-default temperature with HTTP 400,
-    // so leave it at the provider default when talking to Anthropic.
-    if (!/^https?:\/\/api\.anthropic\.com\//i.test(baseUrl + '/')) body.temperature = 0.7;
+    // Only sent when set: some models (current Claude, OpenAI reasoning models)
+    // reject any temperature other than their default with HTTP 400.
+    var temperature = parseFloat(cfg.ai_temperature);
+    if (!isNaN(temperature)) body.temperature = temperature;
 
     var endpoint = baseUrl + '/chat/completions';
     console.log('AI request → ' + endpoint + ' (model: ' + model + ')');
@@ -2518,6 +2519,8 @@ function openSettings() {
     'Base URL:<input type="text" id="ai_url" value=\'' + esc(cfg.ai_url) + '\'>' +
     'Model:<input type="text" id="ai_model" value=\'' + esc(cfg.ai_model) + '\'>' +
     'API key:<input type="password" id="ai_key" value=\'' + esc(cfg.ai_key) + '\'>' +
+    'Temperature (blank for the provider default):<input type="text" id="ai_temperature" inputmode="decimal"' +
+    ' value=\'' + esc(cfg.ai_temperature) + '\' placeholder="e.g. 0.7">' +
     extraHeadersField('ai', 'X-Hermes-Session-Id: brain-dump') +
     '<p class="note" id="nvidia_note" style="display:' + (cfg.ai_preset === 'nvidia' ? 'block' : 'none') + '">Get a free NVIDIA API key at ' +
     '<a href="https://build.nvidia.com" target="_blank">build.nvidia.com</a> ' +
@@ -2807,6 +2810,7 @@ function openSettings() {
     'ai_url:document.getElementById("ai_url").value.trim(),' +
     'ai_model:document.getElementById("ai_model").value.trim(),' +
     'ai_key:document.getElementById("ai_key").value.trim(),' +
+    'ai_temperature:document.getElementById("ai_temperature").value.trim(),' +
     'ai_headers:document.getElementById("ai_headers").value.trim(),' +
     'ai_system:document.getElementById("ai_system").value.trim(),' +
     'ai_keywords:document.getElementById("ai_keywords").value.trim(),' +

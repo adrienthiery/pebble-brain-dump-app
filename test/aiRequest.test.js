@@ -65,11 +65,22 @@ process.stdout.write('Request body\n');
 var anthropic = send({ ai_url: 'https://api.anthropic.com/v1', ai_model: 'claude-opus-5-5', ai_key: 'k' });
 check('Anthropic is sent to its chat/completions endpoint',
     anthropic.request.url, 'https://api.anthropic.com/v1/chat/completions');
-check('Anthropic gets no temperature, which current Claude models reject',
-    'temperature' in anthropic.body, false);
 
-var other = send({ ai_url: 'https://ai.example.com/v1', ai_model: 'm' });
-check('other providers keep temperature 0.7', other.body.temperature, 0.7);
+var unset = send({ ai_url: 'https://ai.example.com/v1', ai_model: 'm' });
+check('no temperature is sent by default, so every provider uses its own',
+    'temperature' in unset.body, false);
+
+var blank = send({ ai_url: 'https://ai.example.com/v1', ai_model: 'm', ai_temperature: '' });
+check('a blank temperature setting sends none', 'temperature' in blank.body, false);
+
+var set = send({ ai_url: 'https://ai.example.com/v1', ai_model: 'm', ai_temperature: '0.7' });
+check('a temperature setting is sent as a number', set.body.temperature, 0.7);
+
+var zero = send({ ai_url: 'https://ai.example.com/v1', ai_model: 'm', ai_temperature: '0' });
+check('a temperature of 0 is still sent', zero.body.temperature, 0);
+
+var junk = send({ ai_url: 'https://ai.example.com/v1', ai_model: 'm', ai_temperature: 'warm' });
+check('a temperature that is not a number sends none', 'temperature' in junk.body, false);
 
 process.stdout.write('Error reporting\n');
 
