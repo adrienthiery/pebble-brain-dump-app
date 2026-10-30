@@ -249,12 +249,12 @@ check('honours custom routing keywords',
     'timeline');
 
 var aiAndTimeline = { ai_enabled: true, timeline_enabled: true };
-check('redirects a timed reminder away from AI to the timeline',
+check('scores a timed reminder for the timeline over AI',
     context.pickDest('remind me what to buy at 5pm?', context.getEnabledDests(aiAndTimeline),
         aiAndTimeline, false), 'timeline');
-check('keeps an untimed reminder away from a timeline that cannot pin it',
+check('leaves an untimed reminder question with the AI instead of moving it to local',
     context.pickDest('remind me what to buy?', context.getEnabledDests(aiAndTimeline),
-        aiAndTimeline, false), 'local');
+        aiAndTimeline, false), 'ai');
 
 check('queues timeline sends that fail', context.QUEUEABLE_DESTS.timeline, 1);
 check('gives the timeline the watch destination index', context.DEST_INDEX.timeline, 10);

@@ -141,17 +141,10 @@ function getCustomKeywords(cfg, dest) {
     return raw.map(function(k) { return k.trim(); }).filter(function(k) { return k.length > 0; });
 }
 
-function isTaskLike(text) {
-    var t = text.toLowerCase();
-    for (var i = 0; i < TASK_SIGNALS.length; i++) {
-        if (t.indexOf(TASK_SIGNALS[i]) >= 0) return true;
-    }
-    return false;
-}
-
 function classifyIntent(text, enabled, cfg) {
     if (enabled.length === 0) return null;
-    // Don't shortcut when only AI is enabled — task-like text should go local instead
+    // Don't shortcut when only AI is enabled: unscored text falls back to the
+    // default destination, which may be local.
     if (enabled.length === 1 && enabled[0] !== 'ai') return enabled[0];
 
     var t = text.toLowerCase();
@@ -1963,14 +1956,6 @@ function pickDest(text, enabled, cfg, isFollowup) {
         ? classifyIntent(text, enabled, cfg)
         : defaultDest;
     if (!dest) dest = defaultDest;
-    // Task/reminder signals must never go to AI — redirect to a task service or local.
-    if (dest === 'ai' && isTaskLike(text)) {
-        if      (enabled.indexOf('tasks')   >= 0) dest = 'tasks';
-        else if (enabled.indexOf('todoist') >= 0) dest = 'todoist';
-        else if (enabled.indexOf('nextcloud_tasks') >= 0) dest = 'nextcloud_tasks';
-        else if (enabled.indexOf('timeline') >= 0 && timelinePinTime(text)) dest = 'timeline';
-        else dest = 'local';
-    }
     return dest;
 }
 
