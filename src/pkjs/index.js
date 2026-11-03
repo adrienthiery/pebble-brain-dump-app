@@ -2317,6 +2317,7 @@ function openSettings() {
     function render(notionStatus, joplinFolders) {
     var joplinNotebookField = joplinNotebookInput(joplinFolders);
     var html = '<!DOCTYPE html><html><head>' +
+    '<meta charset="utf-8">' +
     '<meta name="viewport" content="width=device-width,initial-scale=1">' +
     '<style>' +
     'body{font-family:sans-serif;background:#111;color:#eee;padding:16px;padding-bottom:68px;margin:0}' +
@@ -2833,7 +2834,9 @@ function openSettings() {
     '}' +
     '<\/script></body></html>';
 
-    Pebble.openURL('data:text/html,' + encodeURIComponent(html));
+    // encodeURIComponent writes UTF-8, so say so: without a charset the webview
+    // decodes with the phone's locale (e.g. cp1251), garbling saved non-ASCII.
+    Pebble.openURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
     }
 
     // Both probes run in pkjs, not the webview: the settings page is a data: URL
