@@ -62,6 +62,7 @@
 #define DEST_DISCORD   8
 #define DEST_JOPLIN    9
 #define DEST_TIMELINE  10
+#define DEST_TICKTICK  11
 
 // Destination bitmask bits (must match pkjs DEST_MASK)
 #define DEST_BIT_TASKS     (1 << DEST_TASKS)
@@ -74,6 +75,7 @@
 #define DEST_BIT_DISCORD   (1 << DEST_DISCORD)
 #define DEST_BIT_JOPLIN    (1 << DEST_JOPLIN)
 #define DEST_BIT_TIMELINE  (1 << DEST_TIMELINE)
+#define DEST_BIT_TICKTICK  (1 << DEST_TICKTICK)
 
 // Ink theme — strict black & white
 #define C_SCREEN   GColorBlack
@@ -346,6 +348,7 @@ static const char *dest_full_name(int dest) {
         case DEST_DISCORD:   return "Discord";
         case DEST_JOPLIN:    return "Joplin";
         case DEST_TIMELINE:  return "Timeline";
+        case DEST_TICKTICK:  return "TickTick";
         default:             return "?";
     }
 }
@@ -1182,6 +1185,15 @@ static void draw_glyph_check(GContext *ctx, GPoint c, GColor fg) {
     graphics_draw_line(ctx, GPoint(c.x - 1, c.y + 5), GPoint(c.x + 6, c.y - 4));
 }
 
+// Check inside a circle — TickTick
+static void draw_glyph_circle_check(GContext *ctx, GPoint c, GColor fg) {
+    graphics_context_set_stroke_color(ctx, fg);
+    graphics_context_set_stroke_width(ctx, 1);
+    graphics_draw_circle(ctx, c, 6);
+    graphics_draw_line(ctx, GPoint(c.x - 3, c.y),     GPoint(c.x - 1, c.y + 2));
+    graphics_draw_line(ctx, GPoint(c.x - 1, c.y + 2), GPoint(c.x + 3, c.y - 2));
+}
+
 // Three stacked lines — local Note
 static void draw_glyph_lines(GContext *ctx, GPoint c, GColor fg) {
     c.y -= 1;   // optically sits a touch low otherwise
@@ -1217,6 +1229,7 @@ static void draw_dest_glyph(GContext *ctx, int dest, GPoint c, GColor fg) {
         case DEST_DISCORD:   draw_glyph_letter(ctx, 'D', c, fg); break;
         case DEST_JOPLIN:    draw_glyph_letter(ctx, 'J', c, fg); break;
         case DEST_TIMELINE:  draw_glyph_letter(ctx, 'R', c, fg); break;
+        case DEST_TICKTICK:  draw_glyph_circle_check(ctx, c, fg); break;
         default:             draw_glyph_letter(ctx, '?', c, fg); break;
     }
 }
