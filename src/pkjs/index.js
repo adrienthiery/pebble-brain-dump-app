@@ -2128,7 +2128,8 @@ function watchMirroredSettings(cfg) {
     return {
         DEST_MASK: computeDestMask(cfg),
         QUICK_SKIP_CONFIRM: cfg.quick_skip_confirm ? 1 : 0,
-        QUICK_AUTO_EXIT: cfg.quick_auto_exit !== false ? 1 : 0
+        QUICK_AUTO_EXIT: cfg.quick_auto_exit !== false ? 1 : 0,
+        STRIP_PUNCTUATION: cfg.strip_punctuation ? 1 : 0
     };
 }
 
@@ -2349,6 +2350,8 @@ function openSettings() {
     '<div class="section">' +
     '<label><input type="checkbox" id="metric_units" ' + chk(cfg.metric_units !== false) + '>' +
     '<span>Metric units (km, °C)</span></label>' +
+    '<label><input type="checkbox" id="strip_punctuation" ' + chk(cfg.strip_punctuation) + '>' +
+    '<span>Remove final punctuation (.?!) from notes</span></label>' +
     '<p class="note">24h / 12h clock is read directly from your watch.</p>' +
     '</div>' +
 
@@ -2757,6 +2760,7 @@ function openSettings() {
     'function buildCfg(){' +
     'return {' +
     'metric_units:document.getElementById("metric_units").checked,' +
+    'strip_punctuation:document.getElementById("strip_punctuation").checked,' +
     'quick_skip_confirm:document.getElementById("quick_skip_confirm").checked,' +
     'quick_auto_exit:document.getElementById("quick_auto_exit").checked,' +
     'routing_auto:!document.getElementById("disable_smart_routing").checked,' +

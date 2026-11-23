@@ -43,6 +43,7 @@
 // on-watch so they're available immediately at quick-launch time).
 #define PERSIST_QUICK_SKIP_CONFIRM   5
 #define PERSIST_QUICK_AUTO_EXIT      6
+#define PERSIST_STRIP_PUNCTUATION    7
 
 // Reminders (local storage, always available)
 #define MAX_REMINDERS       16
@@ -224,6 +225,7 @@ static bool    s_cfg_quick_auto_exit    = true;       // exit once the note is s
 static int16_t s_resp_scroll_offset  = 0;
 static int16_t s_detail_scroll_offset = 0;
 static bool    s_dictation_adds      = false;   // next dictation appends to s_note_buf
+static bool    s_cfg_strip_punctuation = false; // Preferences: drop dictation's final punctuation
 
 // --- History ---
 static int      s_history_count = 0;
@@ -799,6 +801,11 @@ static void inbox_received_callback(DictionaryIterator *iter, void *context) {
         s_cfg_quick_auto_exit = qae_t->value->int32 != 0;
         persist_write_bool(PERSIST_QUICK_AUTO_EXIT, s_cfg_quick_auto_exit);
     }
+    Tuple *sp_t = dict_find(iter, MESSAGE_KEY_STRIP_PUNCTUATION);
+    if (sp_t) {
+        s_cfg_strip_punctuation = sp_t->value->int32 != 0;
+        persist_write_bool(PERSIST_STRIP_PUNCTUATION, s_cfg_strip_punctuation);
+    }
 
     // ROUTING_DONE — JS has decided destination
     Tuple *routing_t = dict_find(iter, MESSAGE_KEY_ROUTING_DONE);
@@ -916,6 +923,21 @@ static void outbox_failed_callback(DictionaryIterator *iter,
 // DICTATION CALLBACK
 // ============================================================================
 
+// Drop final punctuation (and trailing spaces) from s_note_buf when enabled.
+static void strip_final_punctuation(void) {
+    if (!s_cfg_strip_punctuation) return;
+    size_t len = strlen(s_note_buf);
+    while (len > 0) {
+        char ch = s_note_buf[len - 1];
+        if (ch == ' ' || strchr(".!?", ch)) {
+            len--;
+        } else {
+            break;
+        }
+    }
+    s_note_buf[len] = '\0';
+}
+
 static void dictation_callback(DictationSession *session,
                                 DictationSessionStatus status,
                                 char *transcription, void *context) {
@@ -932,6 +954,7 @@ static void dictation_callback(DictationSession *session,
             size_t len = strlen(s_note_buf);
             snprintf(s_note_buf + len, NOTE_BUF_SIZE - len, "%s%s",
                      len ? " " : "", transcription);
+            strip_final_punctuation();
         }
         s_confirm_is_followup = is_followup;
         confirm_window_push();
@@ -941,6 +964,7 @@ static void dictation_callback(DictationSession *session,
     if (status == DictationSessionStatusSuccess) {
         strncpy(s_note_buf, transcription, NOTE_BUF_SIZE - 1);
         s_note_buf[NOTE_BUF_SIZE - 1] = '\0';
+        strip_final_punctuation();
         APP_LOG(APP_LOG_LEVEL_INFO, "Dictation: %s", s_note_buf);
         // Quick Launch hands-off capture: route straight away, no review screen.
         // Follow-ups (AI thread) keep the review step — they're already interactive.
@@ -2749,6 +2773,7 @@ static void init(void) {
     s_cfg_quick_skip_confirm = persist_read_bool(PERSIST_QUICK_SKIP_CONFIRM);
     s_cfg_quick_auto_exit    = !persist_exists(PERSIST_QUICK_AUTO_EXIT)
                                || persist_read_bool(PERSIST_QUICK_AUTO_EXIT);
+    s_cfg_strip_punctuation = persist_read_bool(PERSIST_STRIP_PUNCTUATION);
 
     // Push home window
     home_window_push();
