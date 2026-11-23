@@ -1,5 +1,5 @@
 // Brain Dump — PebbleKit JS
-// Routes voice notes to Google Tasks / Notion / AI agent / Custom Webhook / Discord / Joplin / Pebble Timeline
+// Routes voice notes to Google Tasks / Notion / AI agent / Custom Webhook / Discord / Joplin / Pebble Timeline / TickTick
 // Intent classification runs locally; no extra API call needed for routing.
 
 var KEY_CONFIG  = 'brain_dump_cfg_v1';
@@ -117,6 +117,7 @@ function getEnabledDests(cfg) {
     if (cfg.nextcloud_tasks_enabled) d.push('nextcloud_tasks');
     if (cfg.joplin_enabled)  d.push('joplin');
     if (cfg.timeline_enabled) d.push('timeline');
+    if (cfg.ticktick_enabled) d.push('ticktick');
     return d;
 }
 
@@ -316,6 +317,19 @@ function classifyIntent(text, enabled, cfg) {
         });
         getCustomKeywords(cfg, 'timeline').forEach(function(k) {
             if (t.indexOf(k) >= 0) scores['timeline'] += 2;
+        });
+    }
+
+    // Task signals — TickTick
+    if (scores['ticktick'] !== undefined) {
+        TASK_SIGNALS.forEach(function(p) { if (t.indexOf(p) >= 0) scores['ticktick'] += 2; });
+        tw.forEach(function(w) { if (t.indexOf(w) >= 0) scores['ticktick'] += 1; });
+        // TickTick-specific keywords
+        ['ticktick', 'add to ticktick', 'in ticktick', 'to-do', 'todo', 'to do'].forEach(function(k) {
+            if (t.indexOf(k) >= 0) scores['ticktick'] += 4;
+        });
+        getCustomKeywords(cfg, 'ticktick').forEach(function(k) {
+            if (t.indexOf(k) >= 0) scores['ticktick'] += 2;
         });
     }
 
@@ -1917,15 +1931,66 @@ function stripDateTimeFromText(text) {
 }
 
 // ============================================================================
+// TICKTICK
+// ============================================================================
+
+// "yyyy-MM-ddT00:00:00+hhmm" for local midnight, as TickTick expects.
+function toTickTickDate(d) {
+    function pad(n) { return n < 10 ? '0' + n : '' + n; }
+    var off = -d.getTimezoneOffset(), sign = off >= 0 ? '+' : '-';
+    off = Math.abs(off);
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+           'T00:00:00' + sign + pad(Math.floor(off / 60)) + pad(off % 60);
+}
+
+function sendToTickTick(text, cfg, cb) {
+    var token = (cfg.ticktick_token || '').replace(/^Bearer\s+/i, '').trim();
+    if (!token) { cb(false, 'No TickTick token'); return; }
+
+    var body = { title: text };
+
+    if (cfg.ticktick_date === 'today' || cfg.ticktick_date === 'tomorrow') {
+        var due = new Date();
+        if (cfg.ticktick_date === 'tomorrow') due.setDate(due.getDate() + 1);
+        body.isAllDay = true;
+        body.startDate = body.dueDate = toTickTickDate(due);
+    }
+
+    var tags = (cfg.ticktick_tags || '').split(',')
+        .map(function(t) { return t.trim().replace(/^#+/, ''); })
+        .filter(function(t) { return t; });
+    if (tags.length) body.tags = tags;
+
+    // 1 low, 3 medium, 5 high; unset = none.
+    if (cfg.ticktick_priority) body.priority = parseInt(cfg.ticktick_priority, 10);
+
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', 'https://api.ticktick.com/open/v1/task');
+    xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.onload = function() {
+        if (this.status >= 200 && this.status < 300) {
+            cb(true, 'ticktick');
+        } else if (this.status === 401) {
+            cb(false, 'Invalid token');
+        } else {
+            cb(false, 'Error ' + this.status);
+        }
+    };
+    xhr.onerror = function() { cb(false, 'Network error'); };
+    xhr.send(JSON.stringify(body));
+}
+
+// ============================================================================
 // ROUTER
 // ============================================================================
 
-var DEST_INDEX = { tasks: 0, notion: 1, ai: 2, webhook: 3, local: 4, todoist: 5, nextcloud: 6, nextcloud_tasks: 7, discord: 8, joplin: 9, timeline: 10 };
+var DEST_INDEX = { tasks: 0, notion: 1, ai: 2, webhook: 3, local: 4, todoist: 5, nextcloud: 6, nextcloud_tasks: 7, discord: 8, joplin: 9, timeline: 10, ticktick: 11 };
 
 // Destinations whose delivery can be safely retried or resumed later. 'ai' (a
 // live conversation) and 'local' (saved on-watch) are intentionally excluded
 // from the retry queue.
-var QUEUEABLE_DESTS = { tasks: 1, notion: 1, webhook: 1, todoist: 1, nextcloud: 1, nextcloud_tasks: 1, discord: 1, joplin: 1, timeline: 1 };
+var QUEUEABLE_DESTS = { tasks: 1, notion: 1, webhook: 1, todoist: 1, nextcloud: 1, nextcloud_tasks: 1, discord: 1, joplin: 1, timeline: 1, ticktick: 1 };
 
 // Dispatch a note to a single cloud destination. Shared by the live router and
 // the retry-queue flush so both take exactly the same delivery path.
@@ -1940,6 +2005,7 @@ function sendToDest(dest, text, cfg, cb, retryState) {
         case 'nextcloud_tasks': sendToNextcloudTasks(text, cfg, cb); break;
         case 'joplin':          sendToJoplin        (text, cfg, cb); break;
         case 'timeline':        sendToTimeline      (text, cfg, cb, retryState); break;
+        case 'ticktick':        sendToTickTick      (text, cfg, cb); break;
         default:                cb(false, 'Unknown destination');
     }
 }
@@ -1985,7 +2051,7 @@ function routeAndSend(text, isFollowup) {
     // Original text is still used for routing, due-date extraction, and AI context.
     var sendText = cleanNoteText(text);
 
-    var DEST_LABEL = { tasks: 'Tasks', notion: 'Notion', ai: 'AI', webhook: 'Webhook', local: 'Local', todoist: 'Todoist', nextcloud: 'Nextcloud Notes', nextcloud_tasks: 'Nextcloud Tasks', discord: 'Discord', joplin: 'Joplin', timeline: 'Timeline' };
+    var DEST_LABEL = { tasks: 'Tasks', notion: 'Notion', ai: 'AI', webhook: 'Webhook', local: 'Local', todoist: 'Todoist', nextcloud: 'Nextcloud Notes', nextcloud_tasks: 'Nextcloud Tasks', discord: 'Discord', joplin: 'Joplin', timeline: 'Timeline', ticktick: 'TickTick' };
 
     function onResult(ok, data, retryState) {
         if (!ok) {
@@ -2116,6 +2182,7 @@ function computeDestMask(cfg) {
     if (enabled.indexOf('discord')   >= 0) mask |= 256;
     if (enabled.indexOf('joplin')    >= 0) mask |= 512;
     if (enabled.indexOf('timeline')  >= 0) mask |= 1024;
+    if (enabled.indexOf('ticktick')  >= 0) mask |= 2048;
     return mask;
 }
 
@@ -2379,6 +2446,7 @@ function openSettings() {
     '<option value="discord"   ' + sel(cfg.default_dest,'discord')   + '>Discord</option>' +
     '<option value="joplin"    ' + sel(cfg.default_dest,'joplin')    + '>Joplin</option>' +
     '<option value="timeline"  ' + sel(cfg.default_dest,'timeline')  + '>Pebble Timeline</option>' +
+    '<option value="ticktick" ' + sel(cfg.default_dest,'ticktick') + '>TickTick</option>' +
     '</select></label>' +
     '</div>' +
 
@@ -2584,6 +2652,28 @@ function openSettings() {
     ' value=\'' + esc(cfg.timeline_keywords) + '\' placeholder="timeline, pin it, ...">' +
     '</div></div>' +
 
+    // ---- TickTick ----
+    '<div class="section" id="sec_ticktick">' +
+    '<label class="toggle-label"><input type="checkbox" id="ticktick_enabled" ' + chk(cfg.ticktick_enabled) + '>' +
+    ' TickTick</label>' +
+    '<div class="fields">' +
+    'Bearer token:<input type="password" id="ticktick_token" value=\'' + esc(cfg.ticktick_token) + '\'>' +
+    'Tags (comma-separated):<input type="text" id="ticktick_tags" value=\'' + esc(cfg.ticktick_tags) + '\' placeholder="inbox, pebble">' +
+    'Date:<select id="ticktick_date">' +
+    '<option value="" '         + sel(cfg.ticktick_date || '', '')  + '>None</option>' +
+    '<option value="today" '    + sel(cfg.ticktick_date, 'today')    + '>Today</option>' +
+    '<option value="tomorrow" ' + sel(cfg.ticktick_date, 'tomorrow') + '>Tomorrow</option>' +
+    '</select>' +
+    'Priority:<select id="ticktick_priority">' +
+    '<option value="" '  + sel(cfg.ticktick_priority || '', '') + '>None</option>' +
+    '<option value="1" ' + sel(cfg.ticktick_priority, '1') + '>Low</option>' +
+    '<option value="3" ' + sel(cfg.ticktick_priority, '3') + '>Medium</option>' +
+    '<option value="5" ' + sel(cfg.ticktick_priority, '5') + '>High</option>' +
+    '</select>' +
+    '<br>Routing keywords (comma-separated, added to defaults):<input type="text" id="ticktick_keywords"' +
+    ' value=\'' + esc(cfg.ticktick_keywords) + '\' placeholder="ticktick, add to ticktick, ...">' +
+    '</div></div>' +
+
     '<div class="save-bar"><button onclick="save()">Save</button></div>' +
 
     '<script>' +
@@ -2673,7 +2763,7 @@ function openSettings() {
     'function updateRoutingUI(){' +
       'var off=document.getElementById("disable_smart_routing").checked;' +
       'var def=document.getElementById("default_dest").value;' +
-      '["tasks","todoist","notion","nextcloud","nextcloud_tasks","ai","webhook","discord","joplin","timeline"].forEach(function(d){' +
+      '["tasks","todoist","notion","nextcloud","nextcloud_tasks","ai","webhook","discord","joplin","timeline","ticktick"].forEach(function(d){' +
         'var el=document.getElementById("sec_"+d);if(!el)return;' +
         'var dim=off&&d!==def;' +
         'el.style.opacity=dim?"0.5":"";' +
@@ -2819,7 +2909,13 @@ function openSettings() {
     'joplin_tags:document.getElementById("joplin_tags").value.trim(),' +
     'joplin_keywords:document.getElementById("joplin_keywords").value.trim(),' +
     'timeline_enabled:document.getElementById("timeline_enabled").checked,' +
-    'timeline_keywords:document.getElementById("timeline_keywords").value.trim()' +
+    'timeline_keywords:document.getElementById("timeline_keywords").value.trim(),' +
+    'ticktick_enabled:document.getElementById("ticktick_enabled").checked,' +
+    'ticktick_token:document.getElementById("ticktick_token").value.trim(),' +
+    'ticktick_tags:document.getElementById("ticktick_tags").value.trim(),' +
+    'ticktick_date:document.getElementById("ticktick_date").value,' +
+    'ticktick_priority:document.getElementById("ticktick_priority").value.trim(),' +
+    'ticktick_keywords:document.getElementById("ticktick_keywords").value.trim()' +
     '};' +
     '}' +
     'function save(){' +
